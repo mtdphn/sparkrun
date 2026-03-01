@@ -11,7 +11,7 @@ import logging
 import subprocess
 import time
 
-from sparkrun.config import SparkrunConfig, resolve_cache_dir
+from sparkrun.core_models.config import SparkrunConfig, resolve_cache_dir
 from sparkrun.utils import is_valid_ip  # noqa: F401 — re-exported for callers
 from sparkrun.orchestration.ssh import (
     RemoteResult,
@@ -264,7 +264,7 @@ def try_clear_page_cache(
     Failures are non-fatal — a warning is logged with a hint about
     ``sparkrun setup clear-cache --save-sudo``.
     """
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core_models.hosts import is_local_host
     from sparkrun.scripts import read_script
 
     script = read_script("clear_cache.sh")
@@ -558,7 +558,7 @@ def run_script_on_host(
     If *host* is ``"localhost"``, ``"127.0.0.1"``, or empty, runs locally.
     Otherwise runs via SSH.
     """
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core_models.hosts import is_local_host
     if is_local_host(host):
         return run_local_script(script, dry_run=dry_run)
     kw = ssh_kwargs or {}
@@ -573,7 +573,7 @@ def run_command_on_host(
         dry_run: bool = False,
 ) -> RemoteResult:
     """Run a command on a host — dispatches to local or remote execution."""
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core_models.hosts import is_local_host
     if is_local_host(host):
         return run_local_script("#!/bin/bash\n" + command, dry_run=dry_run)
     kw = ssh_kwargs or {}

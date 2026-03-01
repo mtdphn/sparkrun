@@ -16,7 +16,7 @@ from scitrera_app_framework import Plugin, Variables
 from vpd.next.util import read_yaml
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core_models.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 

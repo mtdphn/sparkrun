@@ -33,7 +33,7 @@ def recipe(ctx):
 @click.pass_context
 def recipe_list(ctx, registry, runtime, show_all, query, config_path=None):
     """List available recipes from all registries."""
-    from sparkrun.recipe import list_recipes, filter_recipes
+    from sparkrun.core_models.recipe import list_recipes, filter_recipes
     from sparkrun.utils.cli_formatters import format_recipe_table
 
     config, registry_mgr = _get_config_and_registry(config_path)
@@ -42,7 +42,7 @@ def recipe_list(ctx, registry, runtime, show_all, query, config_path=None):
     if query:
         recipes = registry_mgr.search_recipes(query, include_hidden=show_all)
     else:
-        from sparkrun.recipe import discover_cwd_recipes
+        from sparkrun.core_models.recipe import discover_cwd_recipes
         recipes = list_recipes(registry_manager=registry_mgr, include_hidden=show_all,
                                local_files=discover_cwd_recipes())
 
@@ -59,7 +59,7 @@ def recipe_list(ctx, registry, runtime, show_all, query, config_path=None):
 @click.pass_context
 def recipe_search(ctx, registry, runtime, show_all, query, config_path=None):
     """Search for recipes by name, model, or description."""
-    from sparkrun.recipe import filter_recipes
+    from sparkrun.core_models.recipe import filter_recipes
     from sparkrun.utils.cli_formatters import format_recipe_table
 
     config, registry_mgr = _get_config_and_registry(config_path)
@@ -184,7 +184,7 @@ def recipe_vram(ctx, recipe_name, tensor_parallel, max_model_len, gpu_mem, no_au
 def recipe_update(ctx, registry, config_path=None, ):
     """Update recipe registries from git."""
     click.echo("Warning: 'sparkrun recipe update' is deprecated. Use 'sparkrun registry update' instead.", err=True)
-    from sparkrun.registry import RegistryError
+    from sparkrun.core_models.registry import RegistryError
 
     config, registry_mgr = _get_config_and_registry(config_path)
 

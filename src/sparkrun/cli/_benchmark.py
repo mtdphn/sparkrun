@@ -94,8 +94,8 @@ def _run_benchmark(
     """Execute the full benchmark flow: launch inference -> benchmark -> stop."""
     from sparkrun.benchmarking.base import BenchmarkSpec, export_results
     from sparkrun.bootstrap import init_sparkrun, get_runtime, get_benchmarking_framework
-    from sparkrun.config import SparkrunConfig
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core_models.config import SparkrunConfig
+    from sparkrun.core_models.hosts import is_local_host
     from sparkrun.orchestration.primitives import (
         build_ssh_kwargs,
         detect_host_ip,
@@ -126,7 +126,9 @@ def _run_benchmark(
     bench_args: dict = {}
 
     if profile:
-        from sparkrun.recipe import find_benchmark_profile, ProfileError, ProfileAmbiguousError
+        from ..core_models.benchmark_profiles import find_benchmark_profile
+        from ..core_models.benchmark_profiles import ProfileAmbiguousError
+        from ..core_models.benchmark_profiles import ProfileError
         try:
             profile_path = find_benchmark_profile(profile, config, _registry_mgr)
         except (ProfileError, ProfileAmbiguousError) as e:

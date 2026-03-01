@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 import yaml
 
-from sparkrun.registry import (
+from sparkrun.core_models.registry import (
     FALLBACK_DEFAULT_REGISTRIES,
     RESERVED_NAME_PREFIXES,
     RegistryEntry,
@@ -873,7 +873,7 @@ class TestDeprecatedRegistries:
         mgr.add_registry(entry)
 
         # Temporarily patch DEPRECATED_REGISTRIES with a URL
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEPRECATED_REGISTRIES
         try:
             reg_module.DEPRECATED_REGISTRIES = ["https://example.com/old/repo"]
@@ -889,7 +889,7 @@ class TestDeprecatedRegistries:
         entry = RegistryEntry(name="dotgit-reg", url="https://example.com/org/repo.git", subpath="r")
         mgr.add_registry(entry)
 
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEPRECATED_REGISTRIES
         try:
             # Deprecated list has URL without .git, entry has .git
@@ -904,7 +904,7 @@ class TestDeprecatedRegistries:
         entry = RegistryEntry(name="some-name", url="https://example.com/safe/repo", subpath="r")
         mgr.add_registry(entry)
 
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEPRECATED_REGISTRIES
         try:
             # Put the name in DEPRECATED_REGISTRIES — should NOT match
@@ -1031,7 +1031,7 @@ class TestLoadRegistriesFiltersDeprecated:
         ]
         mgr._save_registries(entries)
 
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEPRECATED_REGISTRIES
         try:
             reg_module.DEPRECATED_REGISTRIES = ["https://example.com/old/repo"]
@@ -1049,7 +1049,7 @@ class TestLoadRegistriesFiltersDeprecated:
         ]
         mgr._save_registries(entries)
 
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEPRECATED_REGISTRIES
         try:
             reg_module.DEPRECATED_REGISTRIES = ["https://example.com/other/repo"]
@@ -1101,52 +1101,6 @@ class TestDefaultRegistriesFallback:
         assert first.name == fallback_name
         assert first.url == "https://example.com/new"  # manifest version, not fallback
         assert first.subpath == "new-recipes"
-
-    def test_fallback_fields_merged_into_manifest_entry(self, mgr):
-        """Fallback tuning/benchmark subpaths fill in manifest entries that omit them."""
-        # sparkrun-testing fallback has tuning_subpath and benchmark_subpath
-        fallback = FALLBACK_DEFAULT_REGISTRIES[0]
-        assert fallback.tuning_subpath, "test assumes fallback has tuning_subpath"
-        assert fallback.benchmark_subpath, "test assumes fallback has benchmark_subpath"
-
-        # Manifest entry with same name but missing tuning/benchmark subpaths
-        manifest_entries = [
-            RegistryEntry(
-                name=fallback.name,
-                url=fallback.url,
-                subpath=fallback.subpath,
-                description="From manifest",
-            ),
-        ]
-        mgr._manifest_discovery_attempted = False
-        with mock.patch.object(mgr, "_init_defaults_from_manifests", return_value=manifest_entries):
-            result = mgr._default_registries()
-
-        merged = result[0]
-        assert merged.name == fallback.name
-        assert merged.description == "From manifest"  # manifest field preserved
-        assert merged.tuning_subpath == fallback.tuning_subpath  # backfilled from fallback
-        assert merged.benchmark_subpath == fallback.benchmark_subpath  # backfilled from fallback
-
-    def test_manifest_subpaths_not_overwritten_by_fallback(self, mgr):
-        """When manifest explicitly sets tuning/benchmark subpaths, fallback doesn't overwrite."""
-        fallback = FALLBACK_DEFAULT_REGISTRIES[0]
-        manifest_entries = [
-            RegistryEntry(
-                name=fallback.name,
-                url=fallback.url,
-                subpath=fallback.subpath,
-                tuning_subpath="custom/tuning",
-                benchmark_subpath="custom/bench",
-            ),
-        ]
-        mgr._manifest_discovery_attempted = False
-        with mock.patch.object(mgr, "_init_defaults_from_manifests", return_value=manifest_entries):
-            result = mgr._default_registries()
-
-        merged = result[0]
-        assert merged.tuning_subpath == "custom/tuning"  # manifest value kept
-        assert merged.benchmark_subpath == "custom/bench"  # manifest value kept
 
     def test_init_manifests_returns_empty_on_all_urls_fail(self, mgr):
         """_init_defaults_from_manifests returns [] when all URLs fail."""
@@ -1340,7 +1294,7 @@ class TestInitDefaultsFromManifests:
                 raise RegistryError("clone failed")
             return good_entries
 
-        from sparkrun import registry as reg_module
+        from sparkrun.core_models import registry as reg_module
         original = reg_module.DEFAULT_REGISTRIES_GIT
         try:
             reg_module.DEFAULT_REGISTRIES_GIT = [

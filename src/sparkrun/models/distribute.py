@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from sparkrun.config import resolve_cache_dir
+from sparkrun.core_models.config import resolve_cache_dir
 from sparkrun.models.download import download_model, model_cache_path
 from sparkrun.orchestration.primitives import map_transfer_failures
 from sparkrun.orchestration.ssh import (

@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 from sparkrun.orchestration.job_metadata import generate_cluster_id
-from sparkrun.recipe import Recipe
+from sparkrun.core_models.recipe import Recipe
 from sparkrun.runtimes.vllm_ray import VllmRayRuntime
 from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
 from sparkrun.runtimes.sglang import SglangRuntime

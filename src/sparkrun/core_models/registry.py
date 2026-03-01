@@ -1048,7 +1048,7 @@ class RegistryManager:
         if not recipe_dir.is_dir():
             return []
 
-        from sparkrun.recipe import recipe_summary
+        from sparkrun.core_models.recipe import recipe_summary
 
         recipes = []
         for f in sorted(recipe_dir.rglob("*.yaml")):

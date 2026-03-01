@@ -55,7 +55,7 @@ def _url_cache_path(url: str) -> Path:
     """Return the local cache path for a remote recipe URL."""
     import hashlib
 
-    from sparkrun.config import DEFAULT_CACHE_DIR
+    from sparkrun.core_models.config import DEFAULT_CACHE_DIR
 
     url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
     return DEFAULT_CACHE_DIR / "remote-recipes" / ("%s.yaml" % url_hash)
@@ -155,7 +155,7 @@ def _parse_options(options: tuple[str, ...]) -> dict:
 
 def _get_config_and_registry(config_path=None):
     """Create SparkrunConfig and RegistryManager."""
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core_models.config import SparkrunConfig
     config = SparkrunConfig(config_path) if config_path else SparkrunConfig()
     registry_mgr = config.get_registry_manager()
     return config, registry_mgr
@@ -240,8 +240,8 @@ def _apply_cluster_user(config, cluster_name, hosts, hosts_file, cluster_mgr):
 
 def _get_cluster_manager(v=None):
     """Create a ClusterManager using the SAF config root."""
-    from sparkrun.cluster_manager import ClusterManager
-    from sparkrun.config import get_config_root
+    from sparkrun.core_models.cluster_manager import ClusterManager
+    from sparkrun.core_models.config import get_config_root
     # TODO: switch to leveraging scitrera-app-framework plugin for ClusterManager singleton?
     return ClusterManager(get_config_root(v))
 
@@ -256,7 +256,7 @@ def _load_recipe(config, recipe_name):
     Returns:
         Tuple of (recipe, recipe_path, registry_mgr).
     """
-    from sparkrun.recipe import Recipe, find_recipe, discover_cwd_recipes, RecipeError, RecipeAmbiguousError
+    from sparkrun.core_models.recipe import Recipe, find_recipe, discover_cwd_recipes, RecipeError, RecipeAmbiguousError
 
     # Expand shortcuts (e.g. @spark-arena/UUID -> full URL)
     recipe_name = _expand_recipe_shortcut(recipe_name)
@@ -320,7 +320,7 @@ def _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v=None):
     Returns:
         Tuple of (host_list, cluster_mgr).
     """
-    from sparkrun.hosts import resolve_hosts
+    from sparkrun.core_models.hosts import resolve_hosts
     cluster_mgr = _get_cluster_manager(v)
     host_list = resolve_hosts(
         hosts=hosts,
@@ -467,7 +467,7 @@ class RecipeNameType(click.ParamType):
             # since @registry/name contains '/' but is not a filesystem path)
             if incomplete.startswith("@"):
                 config, registry_mgr = _get_config_and_registry()
-                from sparkrun.recipe import list_recipes
+                from sparkrun.core_models.recipe import list_recipes
 
                 if "/" not in incomplete:
                     # No slash yet — try to expand directly to @registry/recipe
@@ -521,7 +521,7 @@ class RecipeNameType(click.ParamType):
                 return _complete_yaml_files(incomplete)
 
             # Default: list recipe names from visible registries only
-            from sparkrun.recipe import list_recipes, discover_cwd_recipes
+            from sparkrun.core_models.recipe import list_recipes, discover_cwd_recipes
             config, registry_mgr = _get_config_and_registry()
             recipes = list_recipes(registry_manager=registry_mgr,
                                    include_hidden=False,
@@ -656,7 +656,7 @@ class RuntimeNameType(click.ParamType):
     def shell_complete(self, ctx, param, incomplete):
         """Return completion items for known runtimes."""
         try:
-            from sparkrun.recipe import list_recipes
+            from sparkrun.core_models.recipe import list_recipes
             _, registry_mgr = _get_config_and_registry()
             recipes = list_recipes(registry_manager=registry_mgr)
             runtimes = sorted({r.get("runtime", "") for r in recipes if r.get("runtime")})

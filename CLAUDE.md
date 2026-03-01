@@ -53,13 +53,14 @@ src/sparkrun/
 ├── cluster_manager.py  # Named cluster CRUD (YAML files in ~/.config/sparkrun/clusters/)
 ├── hosts.py            # Host resolution priority chain (CLI → file → cluster → default)
 ├── recipe.py           # Recipe loading, validation, v1→v2 migration, config chain
-├── registry.py         # Git-based recipe registry system (sparse checkouts)
+├── registry.py         # Git-based recipe registry system (see Registry System below)
 ├── pending_ops.py      # PID-based lock files for in-progress operations
 ├── runtimes/           # Runtime plugins (see below)
 ├── orchestration/      # SSH, Docker, InfiniBand, script execution primitives
 ├── models/             # HuggingFace model download, distribution, and VRAM estimation
 ├── containers/         # Container image distribution (docker save/load over SSH)
 ├── tuning/             # Triton fused MoE kernel tuning for SGLang and vLLM
+├── benchmarking/       # Benchmark profile loading and execution (llama-bench, llama-benchy)
 ├── utils/              # Shared helpers (coerce_value, suppress_noisy_loggers, etc.)
 └── scripts/            # Embedded bash scripts (IB detection, container launch, etc.)
 ```
@@ -77,6 +78,8 @@ The CLI was split from a single `cli.py` into a package for maintainability. The
 | `_setup.py` | `setup` command group — shell completion, SSH mesh, model/container sync, permissions, cache, networking |
 | `_cluster.py` | `cluster` command group — create/list/show/delete/update saved cluster definitions, cluster status |
 | `_recipe.py` | `recipe` command group — list/show/search recipes across registries |
+| `_registry.py` | `registry` command group — add/remove/enable/disable/update registries, list/show benchmark profiles |
+| `_benchmark.py` | `benchmark` command group — run benchmark profiles against inference workloads |
 | `_tune.py` | `tune` command group — run Triton fused MoE kernel tuning (SGLang and vLLM) |
 
 ### Plugin System (SAF)
@@ -121,6 +124,26 @@ Recipe resolution: `cli.py` → `RegistryManager.find_recipe()` → searches bun
 
 Two recipe format versions exist: v1 (eugr-style, auto-detected by `recipe_version: "1"` or presence of `build_args`/`mods`) and v2 (sparkrun native). vLLM recipes are resolved to either `vllm-ray` (if Ray hints are present) or `vllm-distributed` (default). See `RECIPES.md` for the full specification.
 
+### Registry System
+
+The `RegistryManager` (`registry.py`) tracks recipe collections from remote git repos using sparse checkouts. Registries are stored in `~/.config/sparkrun/registries.yaml`; cached clones live under `~/.cache/sparkrun/registries/`.
+
+**Default registry initialization** (first run, no `registries.yaml`):
+
+1. `_load_registries()` → no file → `_default_registries()`
+2. `_default_registries()` calls `_init_defaults_from_manifests()` which clones each URL in `DEFAULT_REGISTRIES_GIT` and reads its `.sparkrun/registry.yaml` manifest via `_discover_manifest_entries()`. URLs that fail are skipped individually (partial success).
+3. Discovered manifest entries are merged with `FALLBACK_DEFAULT_REGISTRIES`: manifest entries take priority by name; non-conflicting fallback entries are appended. Fallback `tuning_subpath`/`benchmark_subpath` fields are backfilled into manifest entries that omit them.
+4. The combined list is saved to `registries.yaml` for subsequent loads.
+5. If all manifest URLs fail, pure `FALLBACK_DEFAULT_REGISTRIES` is returned (offline/no-git safety net).
+
+**Manifest format** (`.sparkrun/registry.yaml` in a git repo): supports both canonical keys (`subpath`, `tuning_subpath`, `benchmark_subpath`) and short keys (`recipes`, `tuning`, `benchmarks`). Canonical keys take precedence when both are present.
+
+**Shared clones**: When multiple registries point to the same git URL, a single shared clone is used at `_url_<hash>/` with per-registry symlinks. Sparse checkout paths are the union of all subpaths for that URL.
+
+**Reserved name prefixes**: Names starting with reserved prefixes (`sparkrun`, `official`, `arena`, etc.) can only be used by repos hosted under allowed GitHub organizations (`spark-arena`, `scitrera`, `eugr`, `dbotwinick`, `raphaelamorim`). Enforced via `validate_registry_name()`.
+
+**Tab completion**: `RecipeNameType.shell_complete()` in `_common.py` supports `@registry/recipe` syntax — `@` prefix lists registries, `@registry/` lists recipes from that registry. Falls back to showing registry names when recipe cache isn't populated.
+
 ### Model & Container Distribution
 
 Before launching, sparkrun can pre-sync models and container images from the control machine to target hosts:
@@ -161,7 +184,7 @@ Tests use pytest with `pytest-asyncio`. The `conftest.py` provides an `isolate_s
 
 All SSH/Docker operations in tests are mocked — no real hosts are needed. Common fixtures: `tmp_recipe_dir` (creates sample v1/v2 recipes), `cluster_dir`, `hosts_file`, `v` (initialized SAF Variables instance).
 
-Test files cover: bootstrap, CLI commands, CLI recipe integration, cluster manager, config, distribution, Docker command generation, GGUF handling, host resolution, InfiniBand, networking, orchestration primitives, recipes, registry, runtimes, embedded scripts, SSH execution, kernel tuning, and VRAM estimation.
+Test files cover: benchmarking, bootstrap, CLI commands, CLI recipe integration, cluster manager, config, distribution, Docker command generation, GGUF handling, host resolution, InfiniBand, networking, orchestration primitives, recipes, registry (including manifest discovery, fallback merging, shared clones, and reserved name enforcement), runtimes, embedded scripts, SSH execution, kernel tuning, and VRAM estimation.
 
 ### Companion Packages
 

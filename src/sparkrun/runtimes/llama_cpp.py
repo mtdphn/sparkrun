@@ -8,7 +8,7 @@ from typing import Any, TYPE_CHECKING
 from sparkrun.runtimes.base import RuntimePlugin
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core_models.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 

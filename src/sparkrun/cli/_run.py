@@ -70,7 +70,7 @@ def run(
       sparkrun run my-recipe.yaml -o attention_backend=triton -o max_model_len=4096
     """
     from sparkrun.bootstrap import init_sparkrun, get_runtime
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core_models.config import SparkrunConfig
 
     v = init_sparkrun()
     # SAF's init_framework_desktop reconfigures the root logger — re-apply ours

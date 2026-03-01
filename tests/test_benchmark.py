@@ -16,7 +16,7 @@ from sparkrun.benchmarking.base import (
     export_results,
 )
 from sparkrun.benchmarking.llama_benchy import LlamaBenchyFramework
-from sparkrun.recipe import Recipe
+from sparkrun.core_models.recipe import Recipe
 from sparkrun.runtimes.base import RuntimePlugin
 from sparkrun.runtimes.vllm_ray import VllmRayRuntime
 from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime

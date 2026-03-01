@@ -32,8 +32,8 @@ def cluster(ctx):
 @click.pass_context
 def cluster_create(ctx, name, hosts, hosts_file, description, user):
     """Create a new named cluster."""
-    from sparkrun.cluster_manager import ClusterError
-    from sparkrun.hosts import parse_hosts_file
+    from sparkrun.core_models.cluster_manager import ClusterError
+    from sparkrun.core_models.hosts import parse_hosts_file
 
     host_list = [h.strip() for h in hosts.split(",") if h.strip()] if hosts else []
     if hosts_file:
@@ -61,8 +61,8 @@ def cluster_create(ctx, name, hosts, hosts_file, description, user):
 @click.pass_context
 def cluster_update(ctx, name, hosts, hosts_file, description, user):
     """Update an existing cluster."""
-    from sparkrun.cluster_manager import ClusterError
-    from sparkrun.hosts import parse_hosts_file
+    from sparkrun.core_models.cluster_manager import ClusterError
+    from sparkrun.core_models.hosts import parse_hosts_file
 
     host_list = None
     if hosts:
@@ -118,7 +118,7 @@ def cluster_list(ctx):
 @click.pass_context
 def cluster_show(ctx, name):
     """Show details of a saved cluster."""
-    from sparkrun.cluster_manager import ClusterError
+    from sparkrun.core_models.cluster_manager import ClusterError
 
     mgr = _get_cluster_manager()
     try:
@@ -144,7 +144,7 @@ def cluster_show(ctx, name):
 @click.pass_context
 def cluster_delete(ctx, name, force):
     """Delete a saved cluster."""
-    from sparkrun.cluster_manager import ClusterError
+    from sparkrun.core_models.cluster_manager import ClusterError
 
     mgr = _get_cluster_manager()
 
@@ -164,7 +164,7 @@ def cluster_delete(ctx, name, force):
 @click.pass_context
 def cluster_set_default(ctx, name):
     """Set the default cluster."""
-    from sparkrun.cluster_manager import ClusterError
+    from sparkrun.core_models.cluster_manager import ClusterError
 
     mgr = _get_cluster_manager()
     try:
@@ -219,8 +219,8 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, config_path=No
 
       sparkrun cluster status --cluster mylab
     """
-    from sparkrun.config import SparkrunConfig
-    from sparkrun.cluster_manager import query_cluster_status
+    from sparkrun.core_models.config import SparkrunConfig
+    from sparkrun.core_models.cluster_manager import query_cluster_status
     from sparkrun.utils.cli_formatters import format_job_label, format_job_commands, format_host_display
     from sparkrun.orchestration.primitives import build_ssh_kwargs
 

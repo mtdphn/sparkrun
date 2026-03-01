@@ -10,10 +10,10 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sparkrun.config import DEFAULT_CACHE_DIR
+from sparkrun.core_models.config import DEFAULT_CACHE_DIR
 
 if TYPE_CHECKING:
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core_models.config import SparkrunConfig
 
 logger = logging.getLogger(__name__)
 

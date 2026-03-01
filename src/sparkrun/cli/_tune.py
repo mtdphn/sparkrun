@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 
 import click
 
 from ._common import (
     RECIPE_NAME,
-    RUNTIME_NAME,
     _apply_cluster_user,
     _load_recipe,
     _resolve_hosts_or_exit,
@@ -63,7 +61,7 @@ def tune_sglang(
       sparkrun tune sglang qwen3.5-35b-bf16-sglang -H myhost --parallel 2
     """
     from sparkrun.bootstrap import init_sparkrun, get_runtime
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core_models.config import SparkrunConfig
     from sparkrun.tuning.sglang import SglangTuner, DEFAULT_TP_SIZES
 
     v = init_sparkrun()
@@ -146,7 +144,7 @@ def tune_vllm(
       sparkrun tune vllm qwen3-moe-vllm -H myhost --parallel 2
     """
     from sparkrun.bootstrap import init_sparkrun, get_runtime
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core_models.config import SparkrunConfig
     from sparkrun.tuning.vllm import VllmTuner, DEFAULT_TP_SIZES
 
     v = init_sparkrun()
