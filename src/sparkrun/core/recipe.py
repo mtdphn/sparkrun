@@ -582,8 +582,15 @@ class Recipe:
             meta["description"] = self.description
         if self.maintainer:
             meta["maintainer"] = self.maintainer
-        if meta:
-            d["metadata"] = meta  # TODO: should we limit model params that were auto-added?
+
+        # transfer SELECTED model parameters to recipe
+        if meta and meta.get('model_dtype', None) is not None:
+            meta['model_dtype'] = str(meta['model_dtype'])
+        # TODO: kv_dtype should be included and reflect command overrides on kv dtype not just hf auto-detect
+        # if meta and meta.get('kv_dtype', None) is not None:
+        #     meta['kv_dtype'] = str(meta['kv_dtype'])
+        if meta and meta.get('model_params', None) is not None:
+            meta['model_params'] = str(meta['model_params'])
 
         # -- Configuration --
         if self.defaults:
