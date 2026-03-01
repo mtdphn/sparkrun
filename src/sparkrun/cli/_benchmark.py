@@ -99,6 +99,7 @@ def _run_benchmark(
     from sparkrun.orchestration.primitives import (
         build_ssh_kwargs,
         detect_host_ip,
+        find_available_port,
         wait_for_port,
     )
 
@@ -247,7 +248,16 @@ def _run_benchmark(
     ssh_kwargs = build_ssh_kwargs(config)
     head_host = host_list[0]
 
-    # Effective TP for results export
+    # -- Port auto-increment: avoid collisions with running instances --
+    config_chain = recipe.build_config_chain(overrides)
+    desired_port = int(config_chain.get("port") or 8000)
+    serve_port = find_available_port(head_host, desired_port, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+    if serve_port != desired_port:
+        click.echo("Note: port %d in use, using %d instead" % (desired_port, serve_port))
+    # Feed resolved port back so the runtime and downstream code all use it
+    overrides["port"] = serve_port
+
+    # Rebuild config chain with the resolved port
     config_chain = recipe.build_config_chain(overrides)
     effective_tp = int(config_chain.get("tensor_parallel") or 1)
 
@@ -384,8 +394,6 @@ def _run_benchmark(
     # ---------------------------------------------------------------
     result_file = tempfile.mktemp(suffix=".json", prefix="sparkrun_bench_")
     try:
-        serve_port = int(config_chain.get("port") or 8000)
-
         if is_local_host(head_host):
             target_ip = "127.0.0.1"
         else:
