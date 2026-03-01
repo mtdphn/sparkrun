@@ -10,8 +10,8 @@ from typing import Any, TYPE_CHECKING
 from scitrera_app_framework import Plugin, Variables, ext_parse_bool
 
 if TYPE_CHECKING:
-    from sparkrun.config import SparkrunConfig
-    from sparkrun.recipe import Recipe
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,8 @@ class RuntimePlugin(Plugin):
     @abstractmethod
     def generate_command(self, recipe: Recipe, overrides: dict[str, Any],
                          is_cluster: bool, num_nodes: int = 1,
-                         head_ip: str | None = None) -> str:
+                         head_ip: str | None = None,
+                         skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Generate the serve command string from recipe + CLI overrides.
 
         Args:
@@ -70,6 +71,9 @@ class RuntimePlugin(Plugin):
             is_cluster: Whether running in multi-node mode
             num_nodes: Total number of nodes in the cluster
             head_ip: Head node IP (only set for cluster mode)
+            skip_keys: Config keys to omit from the generated command.
+                Used by the benchmark flow to suppress ``served_model_name``
+                so the server responds to the raw HF model ID.
 
         Returns:
             The full command string to execute inside the container
@@ -117,6 +121,7 @@ class RuntimePlugin(Plugin):
             num_nodes: int,
             node_rank: int,
             init_port: int = 25000,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
     ) -> str:
         """Generate the serve command for a specific node in native clustering.
 
@@ -129,6 +134,7 @@ class RuntimePlugin(Plugin):
             num_nodes: Total number of nodes.
             node_rank: This node's rank (0 = head).
             init_port: Coordination port for distributed init.
+            skip_keys: Config keys to omit from the generated command.
 
         Returns:
             The full command string for this node.
@@ -243,6 +249,63 @@ class RuntimePlugin(Plugin):
                 parts.extend([flag, str(value)])
         return parts
 
+    @staticmethod
+    def strip_flags_from_command(
+            command: str,
+            skip_keys: set[str] | frozenset[str],
+            flag_map: dict[str, str],
+            bool_keys: set[str] | frozenset[str] = frozenset(),
+            flag_aliases: dict[str, list[str]] | None = None,
+    ) -> str:
+        """Strip CLI flags for *skip_keys* from a rendered command string.
+
+        Used when ``recipe.render_command()`` produces the command via template
+        substitution, bypassing ``build_flags_from_map()``'s skip_keys support.
+        Each runtime calls this with its own flag_map.
+
+        Args:
+            command: The rendered command string.
+            skip_keys: Config keys whose flags should be removed.
+            flag_map: Mapping of config key to CLI flag string.
+            bool_keys: Set of keys treated as boolean (flag-only, no value).
+            flag_aliases: Optional mapping of config key to additional flag
+                forms (e.g. short flags) that should also be stripped.
+
+        Returns:
+            Command string with the specified flags removed.
+        """
+        import re
+        for key in skip_keys:
+            # Collect all flag forms for this key: canonical + aliases
+            flags_to_strip: list[str] = []
+            canonical = flag_map.get(key)
+            if canonical:
+                flags_to_strip.append(canonical)
+            if flag_aliases and key in flag_aliases:
+                flags_to_strip.extend(flag_aliases[key])
+            if not flags_to_strip:
+                continue
+
+            for flag in flags_to_strip:
+                escaped = re.escape(flag)
+                if key in bool_keys:
+                    command = re.sub(r'\s*' + escaped + r'(?=\s|$)', '', command)
+                else:
+                    # Match the flag, its value, and an optional trailing
+                    # backslash continuation on the same line.
+                    command = re.sub(
+                        escaped + r'\s+\S+\s*\\?\s*\n?', '', command,
+                    )
+
+        # Clean up artifacts from removed lines:
+        # - collapse double backslash-continuations (``\ \``) into one
+        # - remove blank continuation lines (``\`` followed by only whitespace)
+        command = re.sub(r'\\\s*\\\s*\n', '\\\n', command)
+        command = re.sub(r'\\\s*\n(\s*\\\s*\n)', r'\\\n', command)
+        # Remove lines that are only whitespace (left behind after removal)
+        command = re.sub(r'\n\s*\n', '\n', command)
+        return command
+
     def is_delegating_runtime(self) -> bool:
         """True if this runtime delegates entirely to external scripts.
 
@@ -317,6 +380,19 @@ class RuntimePlugin(Plugin):
                 hosts[0], container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
             )
 
+    def get_head_container_name(self, cluster_id: str, is_solo: bool = False) -> str:
+        """Return the expected head/solo container name for *cluster_id*.
+
+        Solo mode always uses ``{cluster_id}_solo``.  Cluster mode
+        delegates to :meth:`_head_container_name` which subclasses
+        override when they use non-standard naming (e.g.
+        ``{cluster_id}_node_0`` for SGLang and vLLM distributed).
+        """
+        from sparkrun.orchestration.docker import generate_container_name
+        if is_solo:
+            return generate_container_name(cluster_id, "solo")
+        return self._head_container_name(cluster_id)
+
     def _head_container_name(self, cluster_id: str) -> str:
         """Return the head container name for log following.
 
@@ -359,9 +435,9 @@ class RuntimePlugin(Plugin):
             config: SparkrunConfig | None = None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
             ib_ip_map: dict[str, str] | None = None,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
             **kwargs,
     ) -> int:
         """Launch a workload -- delegates to solo or cluster implementation.
@@ -378,7 +454,6 @@ class RuntimePlugin(Plugin):
             config: SparkrunConfig instance for SSH settings.
             dry_run: Show what would be done without executing.
             detached: Run serve command in background.
-            skip_ib_detect: Skip InfiniBand detection.
             nccl_env: Pre-detected NCCL environment variables.  When
                 provided (not ``None``), skips runtime IB detection and
                 uses this env directly.
@@ -386,7 +461,11 @@ class RuntimePlugin(Plugin):
                 (management host -> IB IP).  Used by runtimes that need
                 IB addresses for inter-node communication (e.g. llama.cpp
                 RPC).  When ``None``, the runtime may detect IB IPs
-                itself if ``skip_ib_detect`` is ``False``.
+                itself if ``nccl_env`` is also ``None``.
+            skip_keys: Config keys to omit when the runtime regenerates
+                serve commands internally (e.g. native-cluster runtimes
+                that call ``generate_node_command()`` instead of using
+                the pre-built *serve_command*).
             **kwargs: Runtime-specific keyword arguments (e.g. ray_port,
                 dashboard_port, init_port, rpc_port).
 
@@ -404,7 +483,6 @@ class RuntimePlugin(Plugin):
                 config=config,
                 dry_run=dry_run,
                 detached=detached,
-                skip_ib_detect=skip_ib_detect,
                 nccl_env=nccl_env,
             )
         return self._run_cluster(
@@ -419,9 +497,9 @@ class RuntimePlugin(Plugin):
             config=config,
             dry_run=dry_run,
             detached=detached,
-            skip_ib_detect=skip_ib_detect,
             nccl_env=nccl_env,
             ib_ip_map=ib_ip_map,
+            skip_keys=skip_keys,
             **kwargs,
         )
 
@@ -504,7 +582,6 @@ class RuntimePlugin(Plugin):
             config: SparkrunConfig | None = None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
     ) -> int:
         """Launch a single-node inference workload.
@@ -528,7 +605,7 @@ class RuntimePlugin(Plugin):
             generate_container_launch_script,
             generate_exec_serve_script,
         )
-        from sparkrun.hosts import is_local_host
+        from sparkrun.core.hosts import is_local_host
 
         is_local = is_local_host(host)
         container_name = generate_container_name(cluster_id, "solo")
@@ -540,8 +617,7 @@ class RuntimePlugin(Plugin):
         t0 = time.monotonic()
         if nccl_env is not None:
             logger.info("Step 1/3: Using pre-detected NCCL env (%d vars)", len(nccl_env))
-        elif not skip_ib_detect:
-            nccl_env = {}
+        else:
             logger.info("Step 1/3: Detecting InfiniBand on %s...", host)
             if is_local:
                 nccl_env = detect_infiniband_local(dry_run=dry_run)
@@ -550,9 +626,6 @@ class RuntimePlugin(Plugin):
                     [host], ssh_kwargs=ssh_kwargs, dry_run=dry_run,
                 )
             logger.info("Step 1/3: IB detection done (%.1fs)", time.monotonic() - t0)
-        else:
-            nccl_env = {}
-            logger.info("Step 1/3: Skipping InfiniBand detection")
 
         # Step 2: Launch container
         t0 = time.monotonic()
@@ -612,7 +685,7 @@ class RuntimePlugin(Plugin):
             cleanup_containers_local,
         )
         from sparkrun.orchestration.docker import generate_container_name
-        from sparkrun.hosts import is_local_host
+        from sparkrun.core.hosts import is_local_host
 
         container_name = generate_container_name(cluster_id, "solo")
         is_local = is_local_host(host)

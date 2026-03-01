@@ -8,7 +8,7 @@ from typing import Any, TYPE_CHECKING
 from sparkrun.runtimes.base import RuntimePlugin
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,8 @@ class SglangRuntime(RuntimePlugin):
 
     def generate_command(self, recipe: Recipe, overrides: dict[str, Any],
                          is_cluster: bool, num_nodes: int = 1,
-                         head_ip: str | None = None) -> str:
+                         head_ip: str | None = None,
+                         skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Generate the sglang launch_server command.
 
         For cluster mode this produces the *base* command without
@@ -64,9 +65,13 @@ class SglangRuntime(RuntimePlugin):
         # If recipe has an explicit command template, render it
         rendered = recipe.render_command(config)
         if rendered:
+            if skip_keys:
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, _SGLANG_FLAG_MAP, _SGLANG_BOOL_FLAGS,
+                )
             return rendered
 
-        return self._build_command(recipe, config, is_cluster, num_nodes, head_ip)
+        return self._build_command(recipe, config, is_cluster, num_nodes, head_ip, skip_keys=skip_keys)
 
     def generate_node_command(
             self,
@@ -76,6 +81,7 @@ class SglangRuntime(RuntimePlugin):
             num_nodes: int,
             node_rank: int,
             init_port: int = 25000,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
     ) -> str:
         """Generate the sglang command for a specific node.
 
@@ -89,9 +95,13 @@ class SglangRuntime(RuntimePlugin):
         # If recipe has an explicit command template, render it
         rendered = recipe.render_command(config)
         if rendered:
+            if skip_keys:
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, _SGLANG_FLAG_MAP, _SGLANG_BOOL_FLAGS,
+                )
             base = rendered
         else:
-            base = self._build_base_command(recipe, config)
+            base = self._build_base_command(recipe, config, skip_keys=skip_keys)
 
         # Append sglang multi-node arguments
         parts = [
@@ -117,7 +127,8 @@ class SglangRuntime(RuntimePlugin):
         if gguf_path:
             config.put("model", str(gguf_path))
 
-    def _build_base_command(self, recipe: Recipe, config) -> str:
+    def _build_base_command(self, recipe: Recipe, config,
+                            skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the sglang command without cluster-specific arguments."""
         # For GGUF models, use the resolved file path instead of the HF repo name
         model_path = config.get("_gguf_model_path") or recipe.model
@@ -127,22 +138,25 @@ class SglangRuntime(RuntimePlugin):
         if tp:
             parts.extend(["--tp-size", str(tp)])
 
+        skip = {"tensor_parallel"}
+        skip.update(skip_keys)
         parts.extend(self.build_flags_from_map(
             config, _SGLANG_FLAG_MAP, bool_keys=_SGLANG_BOOL_FLAGS,
-            skip_keys={"tensor_parallel"},
+            skip_keys=skip,
         ))
 
         return " ".join(parts)
 
     def _build_command(self, recipe: Recipe, config, is_cluster: bool,
-                       num_nodes: int, head_ip: str | None = None) -> str:
+                       num_nodes: int, head_ip: str | None = None,
+                       skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the sglang launch_server command from structured config.
 
         For cluster mode, includes ``--dist-init-addr`` and ``--nnodes`` but
         NOT ``--node-rank`` (that is added per-node by the orchestrator or
         by :meth:`generate_node_command`).
         """
-        base = self._build_base_command(recipe, config)
+        base = self._build_base_command(recipe, config, skip_keys=skip_keys)
 
         if is_cluster and head_ip:
             base += " --dist-init-addr %s:25000 --nnodes %d" % (head_ip, num_nodes)
@@ -153,6 +167,7 @@ class SglangRuntime(RuntimePlugin):
         """Return SGLang-specific cluster environment variables."""
         return {
             "NCCL_CUMEM_ENABLE": "0",
+            "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "0",  # confirmed for v0.5.9 on 20260205 by DB
         }
 
     def validate_recipe(self, recipe: Recipe) -> list[str]:
@@ -186,12 +201,12 @@ class SglangRuntime(RuntimePlugin):
 
     def get_extra_volumes(self) -> dict[str, str]:
         """Mount SGLang tuning configs if available."""
-        from sparkrun.tuning import get_sglang_tuning_volumes
+        from sparkrun.tuning.sglang import get_sglang_tuning_volumes
         return get_sglang_tuning_volumes() or {}
 
     def get_extra_env(self) -> dict[str, str]:
         """Set SGLANG_MOE_CONFIG_DIR if tuning configs exist."""
-        from sparkrun.tuning import get_sglang_tuning_env
+        from sparkrun.tuning.sglang import get_sglang_tuning_env
         return get_sglang_tuning_env() or {}
 
     # --- Log following hooks ---
@@ -229,9 +244,9 @@ class SglangRuntime(RuntimePlugin):
             config=None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
             init_port: int = 25000,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
             **kwargs,
     ) -> int:
         """Orchestrate a multi-node SGLang cluster using native distribution.
@@ -291,7 +306,7 @@ class SglangRuntime(RuntimePlugin):
         t0 = time.monotonic()
         logger.info("Step 2/6: InfiniBand detection...")
         nccl_env = resolve_nccl_env(
-            nccl_env, skip_ib_detect, hosts,
+            nccl_env, hosts,
             head_host=head_host, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
         )
         logger.info("Step 2/6: IB step done (%.1fs)", time.monotonic() - t0)
@@ -316,6 +331,7 @@ class SglangRuntime(RuntimePlugin):
             recipe=recipe, overrides=overrides,
             head_ip=head_ip, num_nodes=num_nodes,
             node_rank=0, init_port=init_port,
+            skip_keys=skip_keys,
         )
         logger.info("Serve command (head, rank 0):")
         for line in head_command.strip().splitlines():
@@ -390,6 +406,7 @@ class SglangRuntime(RuntimePlugin):
                         recipe=recipe, overrides=overrides,
                         head_ip=head_ip, num_nodes=num_nodes,
                         node_rank=rank, init_port=init_port,
+                        skip_keys=skip_keys,
                     )
                     worker_container = generate_node_container_name(cluster_id, rank)
                     worker_script = self._generate_node_script(

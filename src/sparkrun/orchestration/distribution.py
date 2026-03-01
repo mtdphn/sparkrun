@@ -6,10 +6,10 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
-from sparkrun.hosts import is_local_host
+from sparkrun.core.hosts import is_local_host
 
 if TYPE_CHECKING:
-    from sparkrun.config import SparkrunConfig
+    from sparkrun.core.config import SparkrunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,6 @@ def distribute_resources(
         cache_dir: str,
         config: SparkrunConfig,
         dry_run: bool,
-        skip_ib: bool,
         model_revision: str | None = None,
         recipe_name: str = "",
 ) -> tuple[dict[str, str] | None, dict[str, str], dict[str, str]]:
@@ -107,7 +106,6 @@ def distribute_resources(
         cache_dir: HuggingFace cache directory.
         config: SparkrunConfig instance.
         dry_run: Show what would be done without executing.
-        skip_ib: Skip InfiniBand detection.
         model_revision: Optional HuggingFace model revision to pin.
         recipe_name: Recipe name for pending-op lock display.
 
@@ -121,7 +119,7 @@ def distribute_resources(
     from sparkrun.containers.registry import ensure_image
     from sparkrun.models.distribute import distribute_model_from_local
     from sparkrun.models.download import download_model
-    from sparkrun.pending_ops import pending_op
+    from sparkrun.core.pending_ops import pending_op
 
     # Common kwargs for pending-op lock files
     _pop_kw = dict(
@@ -155,21 +153,20 @@ def distribute_resources(
     transfer_hosts: list[str] | None = None
 
     # Step 1: Detect InfiniBand for NCCL env + transfer routing
-    if not skip_ib:
-        ib_result = detect_ib_for_hosts(
-            host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+    ib_result = detect_ib_for_hosts(
+        host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+    )
+    nccl_env = ib_result.nccl_env
+    ib_ip_map = ib_result.ib_ip_map
+    mgmt_ip_map = ib_result.mgmt_ip_map
+    if ib_result.ib_ip_map:
+        transfer_hosts = [
+            ib_result.ib_ip_map.get(h, h) for h in host_list
+        ]
+        logger.info(
+            "Using IB network for transfers (%d/%d hosts)",
+            len(ib_result.ib_ip_map), len(host_list),
         )
-        nccl_env = ib_result.nccl_env
-        ib_ip_map = ib_result.ib_ip_map
-        mgmt_ip_map = ib_result.mgmt_ip_map
-        if ib_result.ib_ip_map:
-            transfer_hosts = [
-                ib_result.ib_ip_map.get(h, h) for h in host_list
-            ]
-            logger.info(
-                "Using IB network for transfers (%d/%d hosts)",
-                len(ib_result.ib_ip_map), len(host_list),
-            )
 
     # Step 2: Distribute container image
     with pending_op(_lock_id, "image_distribute", **_pop_kw):

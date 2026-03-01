@@ -27,9 +27,9 @@ def registry_setup(tmp_path: Path, monkeypatch):
     cache_root.mkdir(parents=True)
 
     # Point SparkrunConfig to our temp dirs
-    import sparkrun.config
-    monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
-    monkeypatch.setattr(sparkrun.config, "DEFAULT_CACHE_DIR", tmp_path / "cache")
+    import sparkrun.core.config
+    monkeypatch.setattr(sparkrun.core.config, "DEFAULT_CONFIG_DIR", config_root)
+    monkeypatch.setattr(sparkrun.core.config, "DEFAULT_CACHE_DIR", tmp_path / "cache")
 
     # Write registries.yaml
     registry_data = {
@@ -85,10 +85,6 @@ class TestRecipeHelp:
         assert "list" in result.output
         assert "search" in result.output
         assert "show" in result.output
-        assert "update" in result.output
-        assert "registries" in result.output
-        assert "add-registry" in result.output
-        assert "remove-registry" in result.output
 
     def test_main_help_includes_recipe(self, runner):
         """Test that sparkrun --help includes recipe subgroup."""
@@ -189,49 +185,36 @@ class TestRecipeUpdate:
         assert "Error" in result.output
 
 
-class TestRecipeRegistries:
-    """Test recipe registries command."""
+class TestRegistryList:
+    """Test registry list command."""
 
     def test_list_registries(self, runner, registry_setup):
         """Test listing configured registries."""
-        result = runner.invoke(main, ["recipe", "registries"])
+        result = runner.invoke(main, ["registry", "list"])
         assert result.exit_code == 0
         assert "test-registry" in result.output
         assert "https://github.com/example/repo" in result.output
         assert "yes" in result.output.lower()  # enabled
 
 
-class TestRecipeAddRemoveRegistry:
-    """Test recipe add-registry and remove-registry commands."""
+class TestRegistryAddRemove:
+    """Test registry add and remove commands."""
 
-    def test_add_registry(self, runner, registry_setup):
-        """Test adding a new registry."""
-        result = runner.invoke(main, [
-            "recipe", "add-registry", "new-reg",
-            "--url", "https://github.com/test/repo",
-            "--subpath", "recipes",
-        ])
-        assert result.exit_code == 0
-        assert "added" in result.output.lower()
-
-        # Verify it appears in list
-        result = runner.invoke(main, ["recipe", "registries"])
-        assert "new-reg" in result.output
-
-    def test_add_duplicate_registry(self, runner, registry_setup):
-        """Test adding a duplicate registry fails."""
-        result = runner.invoke(main, [
-            "recipe", "add-registry", "test-registry",
-            "--url", "https://github.com/other/repo",
-            "--subpath", "recipes",
-        ])
-        assert result.exit_code != 0
-        assert "Error" in result.output
+    def test_add_registry_from_url(self, runner, registry_setup):
+        """Test adding registries from a URL (manifest-based discovery)."""
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=1, stderr="clone fail")
+            result = runner.invoke(main, [
+                "registry", "add", "https://github.com/test/repo",
+            ])
+            # Clone failure → error exit
+            assert result.exit_code != 0
+            assert "Error" in result.output
 
     def test_remove_registry(self, runner, registry_setup):
         """Test removing a registry."""
         result = runner.invoke(main, [
-            "recipe", "remove-registry", "test-registry",
+            "registry", "remove", "test-registry",
         ])
         assert result.exit_code == 0
         assert "removed" in result.output.lower()
@@ -239,7 +222,23 @@ class TestRecipeAddRemoveRegistry:
     def test_remove_nonexistent_registry(self, runner, registry_setup):
         """Test removing a nonexistent registry fails."""
         result = runner.invoke(main, [
-            "recipe", "remove-registry", "nonexistent",
+            "registry", "remove", "nonexistent",
         ])
         assert result.exit_code != 0
         assert "Error" in result.output
+
+
+class TestRegistryRevertToDefault:
+    """Test registry revert-to-default command."""
+
+    def test_revert_to_defaults(self, runner, registry_setup):
+        """Test reverting registries to defaults."""
+        result = runner.invoke(main, ["registry", "revert-to-defaults"])
+        assert result.exit_code == 0
+        assert "reset to defaults" in result.output.lower()
+
+    def test_revert_to_defaults_hidden(self, runner):
+        """Test that revert-to-defaults is hidden from registry help."""
+        result = runner.invoke(main, ["registry", "--help"])
+        assert result.exit_code == 0
+        assert "revert-to-defaults" not in result.output

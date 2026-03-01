@@ -10,10 +10,12 @@ from scitrera_app_framework.util import find_types_in_modules
 
 if TYPE_CHECKING:
     from sparkrun.runtimes.base import RuntimePlugin
+    from sparkrun.benchmarking.base import BenchmarkingPlugin
 
 logger = logging.getLogger(__name__)
 
 EXT_RUNTIME = "sparkrun.runtime"
+EXT_BENCHMARKING_FRAMEWORKS = "sparkrun.benchmarking"
 
 # Module-level singleton for the sparkrun Variables instance
 _variables: Variables | None = None
@@ -60,6 +62,16 @@ def init_sparkrun(v: Variables | None = None, log_level: str = "WARNING") -> Var
         except (ValueError, TypeError) as e:
             logger.debug("Skipping runtime %s: %s", runtime_cls.__name__, e)
 
+    # Auto-discover all BenchmarkingPlugin subclasses in sparkrun.benchmarking
+    from sparkrun.benchmarking.base import BenchmarkingPlugin as _BenchPlugin
+    discovered_bench = list(find_types_in_modules("sparkrun.benchmarking", _BenchPlugin))
+    for bench_cls in discovered_bench:
+        try:
+            register_plugin(bench_cls, v=v)
+            logger.debug("Registered benchmarking framework: %s", bench_cls.__name__)
+        except (ValueError, TypeError) as e:
+            logger.debug("Skipping benchmarking framework %s: %s", bench_cls.__name__, e)
+
     return v
 
 
@@ -100,3 +112,34 @@ def list_runtimes(v: Variables | None = None) -> list[str]:
 
     all_runtimes = get_extensions(EXT_RUNTIME, v=v)
     return sorted(r.runtime_name for r in all_runtimes.values())
+
+
+def get_benchmarking_framework(name: str, v: Variables | None = None) -> 'BenchmarkingPlugin':
+    """Get a specific benchmarking framework by name.
+
+    Args:
+        name: Benchmarking framework name (e.g. "llama-benchy",...)
+        v: Optional Variables instance; uses singleton if not provided
+
+    Raises:
+        ValueError: If the runtime is not found
+    """
+    if v is None:
+        v = get_variables()
+
+    all_frameworks = get_extensions(EXT_BENCHMARKING_FRAMEWORKS, v=v)
+    for _plugin_name, runtime in all_frameworks.items():
+        if runtime.framework_name == name:
+            return runtime
+
+    available = [r.framework_name for r in all_frameworks.values()]
+    raise ValueError("Unknown benchmarking framework: %r. Available: %s" % (name, available))
+
+
+def list_benchmarking_frameworks(v: Variables | None = None) -> list[str]:
+    """List all registered benchmarking framework names."""
+    if v is None:
+        v = get_variables()
+
+    all_frameworks = get_extensions(EXT_BENCHMARKING_FRAMEWORKS, v=v)
+    return sorted(r.framework_name for r in all_frameworks.values())

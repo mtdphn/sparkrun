@@ -11,8 +11,9 @@ import logging
 import subprocess
 import time
 
-from sparkrun.config import SparkrunConfig, resolve_cache_dir
+from sparkrun.core.config import SparkrunConfig, resolve_cache_dir
 from sparkrun.utils import is_valid_ip  # noqa: F401 — re-exported for callers
+from sparkrun.utils import merge_env  # noqa: F401 — re-exported for callers
 from sparkrun.orchestration.ssh import (
     RemoteResult,
     run_remote_command,
@@ -67,15 +68,6 @@ def build_volumes(
     if extra:
         volumes.update(extra)
     return volumes
-
-
-def merge_env(*env_dicts: dict[str, str] | None) -> dict[str, str]:
-    """Merge multiple environment dicts (later values win)."""
-    merged: dict[str, str] = {}
-    for d in env_dicts:
-        if d:
-            merged.update(d)
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -218,39 +210,33 @@ def detect_infiniband_local(
 
 def resolve_nccl_env(
         nccl_env: dict[str, str] | None,
-        skip_ib_detect: bool,
         hosts: list[str],
         head_host: str | None = None,
         ssh_kwargs: dict | None = None,
         dry_run: bool = False,
 ) -> dict[str, str]:
-    """Resolve NCCL environment: reuse pre-detected, detect, or skip.
+    """Resolve NCCL environment: reuse pre-detected or detect.
 
-    Encapsulates the common 3-branch IB detection pattern used by
-    cluster launch methods.
+    Encapsulates the common IB detection pattern used by cluster launch methods.
 
     Args:
         nccl_env: Pre-detected NCCL env, or ``None`` to trigger detection.
-        skip_ib_detect: If True and *nccl_env* is None, skip detection.
         hosts: Hosts to probe for InfiniBand.
         head_host: Which host's IB config to use (defaults to hosts[0]).
         ssh_kwargs: SSH connection parameters.
         dry_run: Log without executing.
 
     Returns:
-        Dict of NCCL environment variables (empty if no IB found or skipped).
+        Dict of NCCL environment variables (empty if no IB found).
     """
     if nccl_env is not None:
         logger.info("Using pre-detected NCCL env (%d vars)", len(nccl_env))
         return nccl_env
-    if not skip_ib_detect:
-        logger.info("Detecting InfiniBand on %d host(s)...", len(hosts))
-        return detect_infiniband(
-            hosts, head_host=head_host,
-            ssh_kwargs=ssh_kwargs, dry_run=dry_run,
-        )
-    logger.info("Skipping InfiniBand detection")
-    return {}
+    logger.info("Detecting InfiniBand on %d host(s)...", len(hosts))
+    return detect_infiniband(
+        hosts, head_host=head_host,
+        ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +256,7 @@ def try_clear_page_cache(
     Failures are non-fatal — a warning is logged with a hint about
     ``sparkrun setup clear-cache --save-sudo``.
     """
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core.hosts import is_local_host
     from sparkrun.scripts import read_script
 
     script = read_script("clear_cache.sh")
@@ -564,7 +550,7 @@ def run_script_on_host(
     If *host* is ``"localhost"``, ``"127.0.0.1"``, or empty, runs locally.
     Otherwise runs via SSH.
     """
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core.hosts import is_local_host
     if is_local_host(host):
         return run_local_script(script, dry_run=dry_run)
     kw = ssh_kwargs or {}
@@ -579,7 +565,7 @@ def run_command_on_host(
         dry_run: bool = False,
 ) -> RemoteResult:
     """Run a command on a host — dispatches to local or remote execution."""
-    from sparkrun.hosts import is_local_host
+    from sparkrun.core.hosts import is_local_host
     if is_local_host(host):
         return run_local_script("#!/bin/bash\n" + command, dry_run=dry_run)
     kw = ssh_kwargs or {}

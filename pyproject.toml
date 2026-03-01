@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkrun"
-version = "0.0.23"
+version = "0.1.0"
 description = "Launch and manage Docker-based inference workloads on NVIDIA DGX Spark systems"
 readme = "README.md"
 license = "Apache-2.0"
@@ -48,6 +48,9 @@ sglang = "sparkrun.runtimes.sglang:SglangRuntime"
 eugr-vllm = "sparkrun.runtimes.eugr_vllm_ray:EugrVllmRayRuntime"
 llama-cpp = "sparkrun.runtimes.llama_cpp:LlamaCppRuntime"
 
+[project.entry-points."sparkrun.benchmarking"]
+llama-benchy = "sparkrun.benchmarking.llama_benchy:LlamaBenchyFramework"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -59,5 +62,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-line-length = 120
+line-length = 140
 target-version = "py312"

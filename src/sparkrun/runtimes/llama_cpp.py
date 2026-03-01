@@ -8,7 +8,7 @@ from typing import Any, TYPE_CHECKING
 from sparkrun.runtimes.base import RuntimePlugin
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ _LLAMA_CPP_FLAG_MAP = {
     "chat_template": "--chat-template",
     "reasoning_format": "--reasoning-format",
     "split_mode": "--split-mode",
+    "served_model_name": "--alias",
 }
 
 # Defaults injected when not set in recipe config
@@ -36,6 +37,12 @@ _LLAMA_CPP_BOOL_FLAGS = {
     "cont_batching": "--cont-batching",
     "no_webui": "--no-webui",
     "jinja": "--jinja",
+}
+
+# Short-form flag aliases recognised when stripping flags from rendered
+# command templates (e.g. ``-a`` is the short form of ``--alias``).
+_LLAMA_CPP_FLAG_ALIASES: dict[str, list[str]] = {
+    "served_model_name": ["-a"],
 }
 
 # Default RPC port for llama.cpp distributed inference
@@ -66,7 +73,8 @@ class LlamaCppRuntime(RuntimePlugin):
 
     def generate_command(self, recipe: Recipe, overrides: dict[str, Any],
                          is_cluster: bool, num_nodes: int = 1,
-                         head_ip: str | None = None) -> str:
+                         head_ip: str | None = None,
+                         skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Generate the llama-server command.
 
         When a pre-resolved GGUF path is available (``_gguf_model_path``
@@ -87,12 +95,19 @@ class LlamaCppRuntime(RuntimePlugin):
                 # but -hf expects a HF repo spec, not a local file.
                 # Switch to -m (model file path) instead.
                 rendered = rendered.replace("-hf ", "-m ", 1)
+            if skip_keys:
+                all_flags = {**_LLAMA_CPP_FLAG_MAP, **_LLAMA_CPP_BOOL_FLAGS}
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, all_flags, set(_LLAMA_CPP_BOOL_FLAGS),
+                    flag_aliases=_LLAMA_CPP_FLAG_ALIASES,
+                )
             return rendered
 
         # Otherwise, build command from structured defaults
-        return self._build_command(recipe, config)
+        return self._build_command(recipe, config, skip_keys=skip_keys)
 
-    def _build_command(self, recipe: Recipe, config) -> str:
+    def _build_command(self, recipe: Recipe, config,
+                       skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the llama-server command from structured config."""
         from vpd.legacy.yaml_dict import vpd_chain
 
@@ -121,15 +136,17 @@ class LlamaCppRuntime(RuntimePlugin):
         all_flags = {**_LLAMA_CPP_FLAG_MAP, **_LLAMA_CPP_BOOL_FLAGS}
         parts.extend(self.build_flags_from_map(
             config, all_flags, bool_keys=set(_LLAMA_CPP_BOOL_FLAGS),
+            skip_keys=skip_keys,
         ))
 
         return " ".join(parts)
 
     def _build_rpc_head_command(self, recipe: Recipe, config,
                                 worker_hosts: list[str],
-                                rpc_port: int) -> str:
+                                rpc_port: int,
+                                skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the llama-server head command with --rpc for worker nodes."""
-        base = self._build_command(recipe, config)
+        base = self._build_command(recipe, config, skip_keys=skip_keys)
         rpc_addrs = ",".join("%s:%d" % (h, rpc_port) for h in worker_hosts)
         return "%s --rpc %s" % (base, rpc_addrs)
 
@@ -203,10 +220,10 @@ class LlamaCppRuntime(RuntimePlugin):
             config=None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
             ib_ip_map: dict[str, str] | None = None,
             rpc_port: int = _DEFAULT_RPC_PORT,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
             **kwargs,
     ) -> int:
         """Orchestrate a multi-node llama.cpp cluster using RPC.
@@ -272,7 +289,7 @@ class LlamaCppRuntime(RuntimePlugin):
             logger.info("Step 2/5: Using pre-detected NCCL env (%d vars)", len(nccl_env))
             if ib_ip_map:
                 logger.info("  Pre-detected IB IPs for %d host(s)", len(ib_ip_map))
-        elif not skip_ib_detect:
+        else:
             logger.info("Step 2/5: Detecting InfiniBand on all hosts...")
             ib_result = detect_ib_for_hosts(
                 hosts, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
@@ -280,9 +297,6 @@ class LlamaCppRuntime(RuntimePlugin):
             nccl_env = ib_result.nccl_env
             ib_ip_map = ib_result.ib_ip_map
             logger.info("Step 2/5: IB detection done (%.1fs)", time.monotonic() - t0)
-        else:
-            nccl_env = {}
-            logger.info("Step 2/5: Skipping InfiniBand detection")
 
         # Resolve worker RPC addresses: prefer IB IPs for high-speed fabric
         rpc_hosts = []
@@ -342,6 +356,7 @@ class LlamaCppRuntime(RuntimePlugin):
                     host, rpc_port,
                     max_retries=30, retry_interval=2,
                     ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+                    container_name=worker_container_name,
                 )
                 if not ready:
                     logger.error(
@@ -359,6 +374,7 @@ class LlamaCppRuntime(RuntimePlugin):
         config_chain = recipe.build_config_chain(overrides)
         head_command = self._build_rpc_head_command(
             recipe, config_chain, rpc_hosts, rpc_port,
+            skip_keys=skip_keys,
         )
         logger.info("Step 5/5: Launching llama-server on head %s...", head_host)
         logger.info("  Command: %s", head_command[:120])

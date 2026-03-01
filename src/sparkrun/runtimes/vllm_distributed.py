@@ -14,7 +14,7 @@ from sparkrun.runtimes.base import RuntimePlugin
 from sparkrun.runtimes.vllm_ray import _VLLM_FLAG_MAP, _VLLM_BOOL_FLAGS
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,8 @@ class VllmDistributedRuntime(RuntimePlugin):
 
     def generate_command(self, recipe: Recipe, overrides: dict[str, Any],
                          is_cluster: bool, num_nodes: int = 1,
-                         head_ip: str | None = None) -> str:
+                         head_ip: str | None = None,
+                         skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Generate the vllm serve command.
 
         For cluster mode this produces the *base* command without
@@ -48,9 +49,13 @@ class VllmDistributedRuntime(RuntimePlugin):
         # If recipe has an explicit command template, render it
         rendered = recipe.render_command(config)
         if rendered:
+            if skip_keys:
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, _VLLM_FLAG_MAP, _VLLM_BOOL_FLAGS,
+                )
             return rendered
 
-        return self._build_command(recipe, config, is_cluster, num_nodes, head_ip)
+        return self._build_command(recipe, config, is_cluster, num_nodes, head_ip, skip_keys=skip_keys)
 
     def generate_node_command(
             self,
@@ -60,6 +65,7 @@ class VllmDistributedRuntime(RuntimePlugin):
             num_nodes: int,
             node_rank: int,
             init_port: int = 25000,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
     ) -> str:
         """Generate the vllm serve command for a specific node.
 
@@ -73,9 +79,13 @@ class VllmDistributedRuntime(RuntimePlugin):
         # If recipe has an explicit command template, render it
         rendered = recipe.render_command(config)
         if rendered:
+            if skip_keys:
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, _VLLM_FLAG_MAP, _VLLM_BOOL_FLAGS,
+                )
             base = rendered
         else:
-            base = self._build_base_command(recipe, config)
+            base = self._build_base_command(recipe, config, skip_keys=skip_keys)
 
         # Append vLLM native multi-node arguments
         parts = [
@@ -89,7 +99,8 @@ class VllmDistributedRuntime(RuntimePlugin):
             parts.append("--headless")
         return " ".join(parts)
 
-    def _build_base_command(self, recipe: Recipe, config) -> str:
+    def _build_base_command(self, recipe: Recipe, config,
+                            skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the vllm serve command without cluster-specific arguments."""
         parts = ["vllm", "serve", recipe.model]
 
@@ -99,6 +110,7 @@ class VllmDistributedRuntime(RuntimePlugin):
 
         # Add flags from defaults (skip tp and distributed_executor_backend)
         skip = {"tensor_parallel", "distributed_executor_backend"}
+        skip.update(skip_keys)
         parts.extend(self.build_flags_from_map(
             config, _VLLM_FLAG_MAP, bool_keys=_VLLM_BOOL_FLAGS, skip_keys=skip,
         ))
@@ -106,14 +118,15 @@ class VllmDistributedRuntime(RuntimePlugin):
         return " ".join(parts)
 
     def _build_command(self, recipe: Recipe, config, is_cluster: bool,
-                       num_nodes: int, head_ip: str | None = None) -> str:
+                       num_nodes: int, head_ip: str | None = None,
+                       skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the vllm serve command from structured config.
 
         For cluster mode, includes ``--nnodes``, ``--master-addr``, and
         ``--master-port`` but NOT ``--node-rank`` (that is added per-node
         by :meth:`generate_node_command`).
         """
-        base = self._build_base_command(recipe, config)
+        base = self._build_base_command(recipe, config, skip_keys=skip_keys)
 
         if is_cluster and head_ip:
             base += " --nnodes %d --master-addr %s --master-port 25000" % (num_nodes, head_ip)
@@ -124,12 +137,12 @@ class VllmDistributedRuntime(RuntimePlugin):
 
     def get_extra_volumes(self) -> dict[str, str]:
         """Mount vLLM tuning configs if available."""
-        from sparkrun.tuning import get_vllm_tuning_volumes
+        from sparkrun.tuning.vllm import get_vllm_tuning_volumes
         return get_vllm_tuning_volumes() or {}
 
     def get_extra_env(self) -> dict[str, str]:
         """Set VLLM_TUNED_CONFIG_FOLDER if tuning configs exist."""
-        from sparkrun.tuning import get_vllm_tuning_env
+        from sparkrun.tuning.vllm import get_vllm_tuning_env
         return get_vllm_tuning_env() or {}
 
     def get_cluster_env(self, head_ip: str, num_nodes: int) -> dict[str, str]:
@@ -184,9 +197,9 @@ class VllmDistributedRuntime(RuntimePlugin):
             config=None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
             init_port: int = 25000,
+            skip_keys: set[str] | frozenset[str] = frozenset(),
             **kwargs,
     ) -> int:
         """Orchestrate a multi-node vLLM cluster using native distribution.
@@ -246,7 +259,7 @@ class VllmDistributedRuntime(RuntimePlugin):
         t0 = time.monotonic()
         logger.info("Step 2/6: InfiniBand detection...")
         nccl_env = resolve_nccl_env(
-            nccl_env, skip_ib_detect, hosts,
+            nccl_env, hosts,
             head_host=head_host, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
         )
         logger.info("Step 2/6: IB step done (%.1fs)", time.monotonic() - t0)
@@ -271,6 +284,7 @@ class VllmDistributedRuntime(RuntimePlugin):
             recipe=recipe, overrides=overrides,
             head_ip=head_ip, num_nodes=num_nodes,
             node_rank=0, init_port=init_port,
+            skip_keys=skip_keys,
         )
         logger.info("Serve command (head, rank 0):")
         for line in head_command.strip().splitlines():
@@ -345,6 +359,7 @@ class VllmDistributedRuntime(RuntimePlugin):
                         recipe=recipe, overrides=overrides,
                         head_ip=head_ip, num_nodes=num_nodes,
                         node_rank=rank, init_port=init_port,
+                        skip_keys=skip_keys,
                     )
                     worker_container = generate_node_container_name(cluster_id, rank)
                     worker_script = self._generate_node_script(

@@ -22,17 +22,28 @@ Jobs launch in the background (detached containers) and sparkrun follows logs au
 | `--port` | Override serve port |
 | `--tp` / `--tensor-parallel` | Override tensor parallelism |
 | `--gpu-mem` | Override GPU memory utilization (0.0-1.0) |
+| `--served-model-name` | Override served model name |
+| `--max-model-len` | Override maximum model context length |
 | `--image` | Override container image (not recommended) |
 | `--cache-dir` | HuggingFace cache directory |
 | `--option` / `-o` | Override any recipe default: `-o key=value` (repeatable) |
 | `--dry-run` / `-n` | Show what would be done without executing |
 | `--foreground` | Run in foreground (don't detach) |
 | `--no-follow` | Don't follow container logs after launch |
-| `--skip-ib` | Skip InfiniBand detection (not recommended) |
+| `--no-sync-tuning` | Skip syncing tuning configs from registries |
 | `--ray-port` | Ray GCS port — default: 46379 (`vllm-ray` and `eugr-vllm` only) |
-| `--init-port` | SGLang distributed init port — default: 25000 |
+| `--init-port` | vLLM/SGLang distributed init port — default: 25000 |
 | `--dashboard` | Enable Ray dashboard on head node (`vllm-ray` and `eugr-vllm` only) |
 | `--dashboard-port` | Ray dashboard port — default: 8265 |
+
+## Recipe sources
+
+The `<recipe>` argument can be:
+
+- **A local recipe name** — matched against configured registries (e.g. `qwen3-1.7b-vllm`)
+- **A file path** — a local `.yaml` file (e.g. `./my-recipe.yaml`)
+- **A Spark Arena shortcut** — `@spark-arena/<recipe-id>` to run directly from [Spark Arena](https://spark-arena.com)
+- **A URL** — any `https://` URL pointing to a recipe YAML
 
 ## Examples
 
@@ -45,6 +56,9 @@ sparkrun run qwen3-1.7b-vllm --tp 2
 
 # Specific hosts with overrides
 sparkrun run qwen3-1.7b-vllm -H 192.168.11.13,192.168.11.14 -o max_model_len=8192
+
+# Run a recipe from Spark Arena
+sparkrun run @spark-arena/<recipe-id>
 
 # Dry run to preview commands
 sparkrun run nemotron3-nano-30b-nvfp4-vllm --tp 2 --dry-run

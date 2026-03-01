@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from sparkrun.hosts import resolve_hosts, parse_hosts_file, HostResolutionError
-from sparkrun.cluster_manager import ClusterManager
+from sparkrun.core.hosts import resolve_hosts, parse_hosts_file, HostResolutionError
+from sparkrun.core.cluster_manager import ClusterManager
 
 
 def test_parse_hosts_file_basic(tmp_path: Path):

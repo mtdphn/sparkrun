@@ -8,7 +8,7 @@ from typing import Any, TYPE_CHECKING
 from sparkrun.runtimes.base import RuntimePlugin
 
 if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
+    from sparkrun.core.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,8 @@ class VllmRayRuntime(RuntimePlugin):
 
     def generate_command(self, recipe: Recipe, overrides: dict[str, Any],
                          is_cluster: bool, num_nodes: int = 1,
-                         head_ip: str | None = None) -> str:
+                         head_ip: str | None = None,
+                         skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Generate the vllm serve command."""
         config = recipe.build_config_chain(overrides)
 
@@ -62,12 +63,17 @@ class VllmRayRuntime(RuntimePlugin):
             # Ensure --distributed-executor-backend ray is present for cluster mode
             if is_cluster and "--distributed-executor-backend" not in rendered:
                 rendered = rendered.rstrip() + " --distributed-executor-backend ray"
+            if skip_keys:
+                rendered = self.strip_flags_from_command(
+                    rendered, skip_keys, _VLLM_FLAG_MAP, _VLLM_BOOL_FLAGS,
+                )
             return rendered
 
         # Otherwise, build command from structured defaults
-        return self._build_command(recipe, config, is_cluster, num_nodes)
+        return self._build_command(recipe, config, is_cluster, num_nodes, skip_keys=skip_keys)
 
-    def _build_command(self, recipe: Recipe, config, is_cluster: bool, num_nodes: int) -> str:
+    def _build_command(self, recipe: Recipe, config, is_cluster: bool, num_nodes: int,
+                       skip_keys: set[str] | frozenset[str] = frozenset()) -> str:
         """Build the vllm serve command from structured config."""
         parts = ["vllm", "serve", recipe.model]
 
@@ -86,6 +92,7 @@ class VllmRayRuntime(RuntimePlugin):
         skip = {"tensor_parallel"}
         if is_cluster:
             skip.add("distributed_executor_backend")
+        skip.update(skip_keys)
         parts.extend(self.build_flags_from_map(
             config, _VLLM_FLAG_MAP, bool_keys=_VLLM_BOOL_FLAGS, skip_keys=skip,
         ))
@@ -96,12 +103,12 @@ class VllmRayRuntime(RuntimePlugin):
 
     def get_extra_volumes(self) -> dict[str, str]:
         """Mount vLLM tuning configs if available."""
-        from sparkrun.tuning import get_vllm_tuning_volumes
+        from sparkrun.tuning.vllm import get_vllm_tuning_volumes
         return get_vllm_tuning_volumes() or {}
 
     def get_extra_env(self) -> dict[str, str]:
         """Set VLLM_TUNED_CONFIG_FOLDER if tuning configs exist."""
-        from sparkrun.tuning import get_vllm_tuning_env
+        from sparkrun.tuning.vllm import get_vllm_tuning_env
         return get_vllm_tuning_env() or {}
 
     def get_cluster_env(self, head_ip: str, num_nodes: int) -> dict[str, str]:
@@ -159,7 +166,6 @@ class VllmRayRuntime(RuntimePlugin):
             config=None,
             dry_run: bool = False,
             detached: bool = True,
-            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
             ray_port: int = 46379,
             dashboard_port: int = 8265,
@@ -222,7 +228,7 @@ class VllmRayRuntime(RuntimePlugin):
         t0 = time.monotonic()
         logger.info("Step 2/5: InfiniBand detection...")
         nccl_env = resolve_nccl_env(
-            nccl_env, skip_ib_detect, hosts,
+            nccl_env, hosts,
             head_host=head_host, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
         )
         logger.info("Step 2/5: IB step done (%.1fs)", time.monotonic() - t0)

@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 import yaml
 
-from sparkrun.recipe import Recipe, RecipeError, find_recipe, list_recipes, resolve_runtime
+from sparkrun.core.recipe import (
+    Recipe, RecipeError,
+    find_recipe, list_recipes, resolve_runtime,
+    is_recipe_file, discover_cwd_recipes,
+)
 
 
 def test_load_v2_recipe(tmp_recipe_dir: Path):
@@ -20,13 +24,13 @@ def test_load_v2_recipe(tmp_recipe_dir: Path):
     recipe_path = tmp_recipe_dir / "test-vllm.yaml"
     recipe = Recipe.load(recipe_path)
 
-    assert recipe.name == "Test vLLM Recipe"
+    assert recipe.name == "test-vllm"  # name is always the filename stem
     assert recipe.description == "A test recipe for vLLM"
     assert recipe.model == "meta-llama/Llama-2-7b-hf"
     assert recipe.runtime == "vllm-distributed"
     assert recipe.mode == "auto"
     assert recipe.container == "scitrera/dgx-spark-vllm:latest"
-    assert recipe.sparkrun_version == "2"
+    assert recipe.recipe_version == "2"
 
     # Verify defaults
     assert recipe.defaults["port"] == 8000
@@ -50,9 +54,9 @@ def test_load_v1_recipe_migrates_to_eugr(tmp_recipe_dir: Path):
     recipe_path = tmp_recipe_dir / "test-eugr.yaml"
     recipe = Recipe.load(recipe_path)
 
-    assert recipe.name == "Test EUGR Recipe"
+    assert recipe.name == "test-eugr"  # name is always the filename stem
     assert recipe.model == "meta-llama/Llama-2-7b-hf"
-    assert recipe.sparkrun_version == "1"
+    assert recipe.recipe_version == "1"
 
     # Should migrate to eugr-vllm because of build_args and mods
     assert recipe.runtime == "eugr-vllm"
@@ -72,9 +76,9 @@ def test_load_v1_recipe_no_mods_still_eugr(tmp_recipe_dir: Path):
     recipe_path = tmp_recipe_dir / "test-plain-v1.yaml"
     recipe = Recipe.load(recipe_path)
 
-    assert recipe.name == "Test Plain v1 Recipe"
+    assert recipe.name == "test-plain-v1"  # name is always the filename stem
     assert recipe.model == "meta-llama/Llama-2-7b-hf"
-    assert recipe.sparkrun_version == "1"
+    assert recipe.recipe_version == "1"
 
     # v1 format always maps to eugr-vllm
     assert recipe.runtime == "eugr-vllm"
@@ -91,7 +95,7 @@ def test_recipe_from_dict(sample_v2_recipe_data: dict[str, Any]):
     """
     recipe = Recipe.from_dict(sample_v2_recipe_data)
 
-    assert recipe.name == "Sample vLLM Recipe"
+    assert recipe.name == "unnamed"  # from_dict has no source_path, so name defaults
     assert recipe.model == "meta-llama/Llama-2-7b-hf"
     assert recipe.runtime == "vllm-distributed"
     assert recipe.mode == "auto"
@@ -143,29 +147,36 @@ def test_recipe_name_defaults_to_filename(tmp_path):
 
 
 def test_recipe_name_explicit_overrides_filename(tmp_path):
-    """Explicit name in YAML should override filename-derived default."""
+    """Recipe name is always the filename stem, ignoring the YAML name field."""
     recipe_file = tmp_path / "some-file.yaml"
     recipe_file.write_text("name: My Custom Name\nmodel: test-model\nruntime: vllm\n")
     recipe = Recipe.load(recipe_file)
-    assert recipe.name == "My Custom Name"
+    assert recipe.name == "some-file"
 
 
-def test_recipe_slug():
-    """Test slug generation from recipe names with spaces and special characters.
+def test_recipe_slug(tmp_path):
+    """Test slug generation from recipe names (filename stems).
 
-    Verifies that recipe names are correctly converted to URL/filesystem-safe slugs.
+    Recipe.name is always the filename stem, so slugs derive from filenames.
     """
-    recipe1 = Recipe.from_dict({"name": "My Test Recipe", "model": "test"})
+    f1 = tmp_path / "My Test Recipe.yaml"
+    f1.write_text("model: test\nruntime: vllm\n")
+    recipe1 = Recipe.load(f1)
     assert recipe1.slug == "my-test-recipe"
 
-    recipe2 = Recipe.from_dict({"name": "Recipe!!!With@Special#Chars", "model": "test"})
+    f2 = tmp_path / "Recipe!!!With@Special#Chars.yaml"
+    f2.write_text("model: test\nruntime: vllm\n")
+    recipe2 = Recipe.load(f2)
     assert recipe2.slug == "recipe-with-special-chars"
 
-    recipe3 = Recipe.from_dict({"name": "  Extra   Spaces  ", "model": "test"})
-    assert recipe3.slug == "extra-spaces"
+    f3 = tmp_path / "CamelCaseRecipe.yaml"
+    f3.write_text("model: test\nruntime: vllm\n")
+    recipe3 = Recipe.load(f3)
+    assert recipe3.slug == "camelcaserecipe"
 
-    recipe4 = Recipe.from_dict({"name": "CamelCaseRecipe", "model": "test"})
-    assert recipe4.slug == "camelcaserecipe"
+    # from_dict with no source_path defaults to "unnamed"
+    recipe4 = Recipe.from_dict({"model": "test"})
+    assert recipe4.slug == "unnamed"
 
 
 def test_recipe_validate_valid(sample_v2_recipe_data: dict[str, Any]):
@@ -179,16 +190,17 @@ def test_recipe_validate_valid(sample_v2_recipe_data: dict[str, Any]):
 
 
 def test_recipe_validate_missing_name():
-    """Validate a recipe with empty name field and verify error is returned.
+    """Validate a recipe missing model/runtime and verify errors are returned.
 
-    Tests validation error detection for empty required field.
-    Note: Recipe defaults missing 'name' to 'unnamed', so we must
-    explicitly pass an empty string to trigger the validation error.
+    Recipe.name is always populated from the filename stem (or 'unnamed'
+    for from_dict), so we test validation of other required fields instead.
     """
-    recipe = Recipe.from_dict({"name": "", "model": "test-model", "runtime": "vllm"})
+    recipe = Recipe.from_dict({"name": "ignored"})
     issues = recipe.validate()
-    assert len(issues) > 0
-    assert any("name" in issue.lower() for issue in issues)
+    # Should flag missing model (runtime may be resolved by resolvers)
+    assert any("model" in i for i in issues)
+    # Should not find name issue
+    # assert any("name" in issue.lower() for issue in issues)
 
 
 def test_recipe_validate_missing_model():
@@ -307,8 +319,8 @@ def test_render_command_fixes_trailing_space_continuations():
         "defaults": {"port": 8000, "host": "0.0.0.0"},
         "command": (
             "vllm serve {model} \\\n"
-            "    --host {host} \\ \n"       # trailing space after backslash
-            "    --port {port} \\  \n"      # two trailing spaces
+            "    --host {host} \\ \n"  # trailing space after backslash
+            "    --port {port} \\  \n"  # two trailing spaces
             "    --trust-remote-code"
         ),
     })
@@ -391,7 +403,7 @@ def test_list_recipes(tmp_recipe_dir: Path):
 
     # Verify recipe metadata
     vllm_recipe = next(r for r in recipes if r["file"] == "test-vllm")
-    assert vllm_recipe["name"] == "Test vLLM Recipe"
+    assert vllm_recipe["name"] == "test-vllm"  # name is always the filename stem
     assert vllm_recipe["runtime"] == "vllm-distributed"
     assert "path" in vllm_recipe
 
@@ -759,6 +771,7 @@ class TestRecipeMetadata:
     @pytest.fixture()
     def _mock_hf_config(self, monkeypatch):
         """Mock fetch_model_config to return a nested multimodal config."""
+
         def _fake_fetch(model_id, revision=None):
             return {
                 "architectures": ["SomeVLModel"],
@@ -770,6 +783,7 @@ class TestRecipeMetadata:
                     "head_dim": 128,
                 },
             }
+
         monkeypatch.setattr("sparkrun.models.vram.fetch_model_config", _fake_fetch)
 
     @pytest.fixture()
@@ -1055,3 +1069,313 @@ class TestResolverChain:
         # (command hint sets sglang, but v1 migration doesn't touch non-vllm)
         recipe = Recipe.from_dict(data)
         assert recipe.runtime == "sglang"
+
+
+class TestFindRecipePrefix:
+    """Test @registry/name scoped recipe lookups."""
+
+    def test_parse_at_prefix(self, tmp_recipe_dir):
+        """Test that @registry/name is parsed correctly."""
+        from sparkrun.core.recipe import find_recipe, RecipeError
+
+        # Should raise because there's no registry manager for scoped lookup
+        with pytest.raises(RecipeError, match="not found"):
+            find_recipe("@fake-reg/some-recipe", [tmp_recipe_dir])
+
+    def test_find_recipe_ambiguous_raises(self, tmp_path):
+        """Test that ambiguous matches raise RecipeAmbiguousError."""
+        from sparkrun.core.recipe import find_recipe, RecipeAmbiguousError
+        from sparkrun.core.registry import RegistryManager, RegistryEntry
+
+        config = tmp_path / "config"
+        cache = tmp_path / "cache"
+        config.mkdir()
+        cache.mkdir()
+        mgr = RegistryManager(config, cache)
+
+        # Create same recipe in two registries
+        entries = [
+            RegistryEntry(name="reg1", url="https://example.com/1", subpath="recipes"),
+            RegistryEntry(name="reg2", url="https://example.com/2", subpath="recipes"),
+        ]
+        mgr._save_registries(entries)
+
+        for entry in entries:
+            recipe_dir = cache / entry.name / entry.subpath
+            recipe_dir.mkdir(parents=True)
+            (cache / entry.name / ".git").mkdir(exist_ok=True)
+            with open(recipe_dir / "ambiguous-recipe.yaml", "w") as f:
+                yaml.dump({"name": "Ambiguous", "model": "test", "runtime": "vllm"}, f)
+
+        with pytest.raises(RecipeAmbiguousError) as exc_info:
+            find_recipe("ambiguous-recipe", registry_manager=mgr)
+        assert len(exc_info.value.matches) == 2
+
+    def test_scoped_find_resolves_ambiguity(self, tmp_path):
+        """Test that @registry/name resolves ambiguity."""
+        from sparkrun.core.recipe import find_recipe
+        from sparkrun.core.registry import RegistryManager, RegistryEntry
+
+        config = tmp_path / "config"
+        cache = tmp_path / "cache"
+        config.mkdir()
+        cache.mkdir()
+        mgr = RegistryManager(config, cache)
+
+        entries = [
+            RegistryEntry(name="reg1", url="https://example.com/1", subpath="recipes"),
+            RegistryEntry(name="reg2", url="https://example.com/2", subpath="recipes"),
+        ]
+        mgr._save_registries(entries)
+
+        for entry in entries:
+            recipe_dir = cache / entry.name / entry.subpath
+            recipe_dir.mkdir(parents=True)
+            (cache / entry.name / ".git").mkdir(exist_ok=True)
+            with open(recipe_dir / "scoped-recipe.yaml", "w") as f:
+                yaml.dump({"name": "Scoped", "model": "test", "runtime": "vllm"}, f)
+
+        # Scoped to reg1 should work
+        path = find_recipe("@reg1/scoped-recipe", registry_manager=mgr)
+        assert "reg1" in str(path)
+
+    def test_scoped_find_not_found(self, tmp_path):
+        """Test that scoped find raises RecipeError when not found."""
+        from sparkrun.core.recipe import find_recipe, RecipeError
+        from sparkrun.core.registry import RegistryManager, RegistryEntry
+
+        config = tmp_path / "config"
+        cache = tmp_path / "cache"
+        config.mkdir()
+        cache.mkdir()
+        mgr = RegistryManager(config, cache)
+
+        entry = RegistryEntry(name="reg1", url="https://example.com", subpath="recipes")
+        mgr._save_registries([entry])
+        recipe_dir = cache / "reg1" / "recipes"
+        recipe_dir.mkdir(parents=True)
+        (cache / "reg1" / ".git").mkdir(exist_ok=True)
+
+        with pytest.raises(RecipeError, match="not found in registry"):
+            find_recipe("@reg1/nonexistent", registry_manager=mgr)
+
+
+class TestIsRecipeFile:
+    """Test is_recipe_file() validation."""
+
+    def test_valid(self, tmp_path):
+        """YAML with runtime, model, container returns True."""
+        f = tmp_path / "good.yaml"
+        f.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        assert is_recipe_file(f) is True
+
+    def test_missing_model(self, tmp_path):
+        """Returns False when model is missing."""
+        f = tmp_path / "no-model.yaml"
+        f.write_text(yaml.dump({
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        assert is_recipe_file(f) is False
+
+    def test_missing_container(self, tmp_path):
+        """Returns False when container is missing."""
+        f = tmp_path / "no-container.yaml"
+        f.write_text(yaml.dump({
+            "model": "org/model",
+            "runtime": "vllm",
+        }))
+        assert is_recipe_file(f) is False
+
+    def test_missing_runtime(self, tmp_path):
+        """Returns False when resolve_runtime returns unknown (non-dict doesn't reach it)."""
+        f = tmp_path / "no-runtime.yaml"
+        # A YAML list is not a dict, so is_recipe_file returns False
+        f.write_text("- item1\n- item2\n")
+        assert is_recipe_file(f) is False
+
+    def test_not_yaml_dict(self, tmp_path):
+        """Returns False for a YAML list."""
+        f = tmp_path / "list.yaml"
+        f.write_text("[1, 2, 3]\n")
+        assert is_recipe_file(f) is False
+
+    def test_nonexistent(self, tmp_path):
+        """Returns False for a file that doesn't exist."""
+        assert is_recipe_file(tmp_path / "nope.yaml") is False
+
+    def test_invalid_yaml(self, tmp_path):
+        """Returns False for unparseable YAML."""
+        f = tmp_path / "bad.yaml"
+        f.write_text(": :\n  - [invalid\n")
+        assert is_recipe_file(f) is False
+
+    def test_empty_model_string(self, tmp_path):
+        """Returns False when model is an empty string."""
+        f = tmp_path / "empty-model.yaml"
+        f.write_text(yaml.dump({
+            "model": "",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        assert is_recipe_file(f) is False
+
+
+class TestDiscoverCwdRecipes:
+    """Test discover_cwd_recipes() directory scanning."""
+
+    def test_finds_valid(self, tmp_path):
+        """Directory with valid + invalid YAML, only valid returned."""
+        valid = tmp_path / "good.yaml"
+        valid.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "sglang",
+        }))
+        invalid = tmp_path / "not-recipe.yaml"
+        invalid.write_text(yaml.dump({"key": "value"}))
+
+        result = discover_cwd_recipes(tmp_path)
+        assert len(result) == 1
+        assert result[0] == valid
+
+    def test_flat_only(self, tmp_path):
+        """Recipe in subdirectory is NOT found."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        nested = sub / "nested.yaml"
+        nested.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+
+        result = discover_cwd_recipes(tmp_path)
+        assert result == []
+
+    def test_empty_dir(self, tmp_path):
+        """Returns empty list for a directory with no YAML files."""
+        result = discover_cwd_recipes(tmp_path)
+        assert result == []
+
+    def test_yml_extension(self, tmp_path):
+        """Files with .yml extension are also discovered."""
+        f = tmp_path / "recipe.yml"
+        f.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        result = discover_cwd_recipes(tmp_path)
+        assert len(result) == 1
+        assert result[0] == f
+
+    def test_nonexistent_dir(self, tmp_path):
+        """Returns empty list for a nonexistent directory."""
+        result = discover_cwd_recipes(tmp_path / "does-not-exist")
+        assert result == []
+
+    def test_sorted_output(self, tmp_path):
+        """Results are sorted by path."""
+        for name in ("z-recipe.yaml", "a-recipe.yaml", "m-recipe.yaml"):
+            (tmp_path / name).write_text(yaml.dump({
+                "model": "org/model",
+                "container": "img:latest",
+                "runtime": "vllm",
+            }))
+        result = discover_cwd_recipes(tmp_path)
+        assert len(result) == 3
+        assert result == sorted(result)
+
+
+class TestListRecipesLocalFiles:
+    """Test list_recipes() with local_files parameter."""
+
+    def test_local_files_appear_without_registry(self, tmp_path):
+        """Local files appear with no registry key."""
+        f = tmp_path / "local-recipe.yaml"
+        f.write_text(yaml.dump({
+            "name": "My Local Recipe",
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "sglang",
+            "defaults": {"tensor_parallel": 2},
+        }))
+        recipes = list_recipes(local_files=[f])
+        assert len(recipes) == 1
+        assert recipes[0]["name"] == "local-recipe"  # name is the filename stem
+        assert recipes[0]["file"] == "local-recipe"
+        assert recipes[0]["runtime"] == "sglang"
+        assert "registry" not in recipes[0]
+
+    def test_local_files_dedup_with_registry(self, tmp_path):
+        """Local file with same stem as a registry recipe wins (listed first)."""
+        f = tmp_path / "dupe.yaml"
+        f.write_text(yaml.dump({
+            "name": "Local Dupe",
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        # Create a search_path with same-stem recipe
+        search = tmp_path / "search"
+        search.mkdir()
+        (search / "dupe.yaml").write_text(yaml.dump({
+            "name": "Registry Dupe",
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        recipes = list_recipes(search_paths=[search], local_files=[f])
+        # Only one recipe with stem "dupe" should appear (the local one)
+        dupe_recipes = [r for r in recipes if r["file"] == "dupe"]
+        assert len(dupe_recipes) == 1
+        assert dupe_recipes[0]["name"] == "dupe"  # name is the filename stem
+
+
+class TestFindRecipeLocalFiles:
+    """Test find_recipe() with local_files parameter."""
+
+    def test_matches_local_file_by_stem(self, tmp_path):
+        """find_recipe resolves from local_files by stem."""
+        f = tmp_path / "my-local.yaml"
+        f.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        result = find_recipe("my-local", local_files=[f])
+        assert result == f
+
+    def test_matches_local_file_with_extension(self, tmp_path):
+        """find_recipe matches local_files when name includes .yaml extension."""
+        f = tmp_path / "my-local.yaml"
+        f.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        result = find_recipe("my-local.yaml", local_files=[f])
+        assert result == f
+
+    def test_direct_path_takes_priority(self, tmp_path):
+        """Direct file path still wins over local_files."""
+        direct = tmp_path / "direct.yaml"
+        direct.write_text(yaml.dump({
+            "model": "org/model",
+            "container": "img:latest",
+            "runtime": "vllm",
+        }))
+        other = tmp_path / "other" / "direct.yaml"
+        other.parent.mkdir()
+        other.write_text(yaml.dump({
+            "model": "org/other",
+            "container": "img:latest",
+            "runtime": "sglang",
+        }))
+        result = find_recipe(str(direct), local_files=[other])
+        assert result == direct

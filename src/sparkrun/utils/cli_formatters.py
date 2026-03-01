@@ -9,7 +9,7 @@ def format_recipe_table(
         recipes: list[dict[str, Any]],
         *,
         show_model: bool = False,
-        show_file: bool = True,
+        show_file: bool = False,
 ) -> str:
     """Format recipe metadata as a text table.
 
@@ -82,7 +82,8 @@ def format_job_label(meta: dict[str, Any], cluster_id: str) -> str:
 
 def format_job_commands(meta: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return (logs_cmd, stop_cmd) strings from cached metadata."""
-    recipe_name = meta.get("recipe")
+    # Prefer recipe_ref (@spark-arena/UUID or URL) over bare recipe name
+    recipe_name = meta.get("recipe_ref") or meta.get("recipe")
     if not recipe_name:
         return None, None
     job_hosts = meta.get("hosts", [])

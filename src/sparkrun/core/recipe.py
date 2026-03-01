@@ -6,17 +6,25 @@ import logging
 import re
 from os import path as osp
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Optional
+
+import yaml
 
 from vpd.next.util import read_yaml
 from vpd.legacy.yaml_dict import vpd_chain, VirtualPathDictChain
 from vpd.legacy.arguments import arg_substitute
 
 if TYPE_CHECKING:
-    from sparkrun.registry import RegistryManager
+    from sparkrun.core.registry import RegistryManager
     from sparkrun.models.vram import VRAMEstimate
 
 logger = logging.getLogger(__name__)
+
+# Matches a backslash followed by trailing whitespace before a newline.
+# In bash, ``\<newline>`` is a line continuation but ``\ <newline>`` is
+# an escaped space — a common YAML editing mistake that silently breaks
+# multi-line commands.
+_TRAILING_SPACE_CONTINUATION_RE = re.compile(r"\\ +\n")
 
 _RAY_BACKEND_RE = re.compile(r"--distributed-executor-backend\s+ray\b")
 _CMD_VLLM_RE = re.compile(r"^vllm\s+serve\b")
@@ -29,8 +37,36 @@ _KNOWN_KEYS = {
     "runtime", "runtime_version", "mode", "min_nodes", "max_nodes",
     "container", "defaults", "env", "command", "runtime_config",
     "cluster_only", "solo_only",
-    "metadata",
+    "benchmark", "metadata",
 }
+
+
+def _sort_dict_by_patterns(data: dict[str, Any], patterns: list[str]) -> dict[str, Any]:
+    """Return a new dict with keys ordered according to *patterns*.
+
+    Each entry in *patterns* is either an exact key name or an
+    ``fnmatch``-style glob (e.g. ``"model*"``).  Keys are emitted in
+    the order of the first pattern they match; keys that match no
+    pattern are appended alphabetically at the end.
+    """
+    from fnmatch import fnmatch
+
+    ordered: dict[str, Any] = {}
+    remaining = set(data.keys())
+
+    for pattern in patterns:
+        # Collect matching keys in their original insertion order
+        matched = [k for k in data if k in remaining and fnmatch(k, pattern)]
+        matched.sort()
+        for k in matched:
+            ordered[k] = data[k]
+            remaining.discard(k)
+
+    # Append unmatched keys alphabetically
+    for k in sorted(remaining):
+        ordered[k] = data[k]
+
+    return ordered
 
 
 def _resolve_runtime_from_command_hint(recipe: Recipe) -> None:
@@ -61,7 +97,7 @@ def _resolve_runtime_from_command_hint(recipe: Recipe) -> None:
 
 def _resolve_v1_migration(recipe: Recipe) -> None:
     """v1 format recipes -> eugr-vllm runtime."""
-    if recipe.sparkrun_version != "1":
+    if recipe.recipe_version != "1":
         return
     if recipe.runtime in ("vllm", ""):
         recipe.runtime = "eugr-vllm"
@@ -126,10 +162,10 @@ def resolve_runtime(data: dict[str, Any]) -> str:
     if runtime_config is not None and not isinstance(runtime_config, dict):
         raise RecipeError("Recipe 'runtime_config' field must be a mapping, got %s" % type(runtime_config).__name__)
     if runtime in ("vllm", "") and (
-        data.get("build_args")
-        or data.get("mods")
-        or runtime_config.get("build_args")
-        or runtime_config.get("mods")
+            data.get("build_args")
+            or data.get("mods")
+            or runtime_config.get("build_args")
+            or runtime_config.get("mods")
     ):
         return "eugr-vllm"
     if runtime in ("vllm", ""):
@@ -145,8 +181,53 @@ def resolve_runtime(data: dict[str, Any]) -> str:
     return runtime
 
 
+def is_recipe_file(path: Path) -> bool:
+    """Check if a YAML file is a valid sparkrun recipe.
+
+    Requires: parseable YAML dict, resolvable runtime, model, and container fields.
+    """
+    try:
+        data = read_yaml(str(path))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if not data.get("model") or not data.get("container"):
+        return False
+    try:
+        rt = resolve_runtime(data)
+    except Exception:
+        return False
+    return rt != "unknown"
+
+
+def discover_cwd_recipes(directory: Path | None = None) -> list[Path]:
+    """Scan a directory (default CWD) for flat .yaml/.yml files that are valid recipes."""
+    if directory is None:
+        directory = Path.cwd()
+    if not directory.is_dir():
+        return []
+    candidates: list[Path] = []
+    for pattern in ("*.yaml", "*.yml"):
+        candidates.extend(directory.glob(pattern))
+    return sorted(p for p in candidates if is_recipe_file(p))
+
+
 class RecipeError(Exception):
     """Raised when a recipe is invalid or cannot be loaded."""
+
+
+class RecipeAmbiguousError(RecipeError):
+    """Raised when a recipe name matches multiple registries."""
+
+    def __init__(self, name: str, matches: list[tuple[str, Path]]):
+        self.name = name
+        self.matches = matches
+        registries = ", ".join(reg for reg, _ in matches)
+        super().__init__(
+            "Recipe '%s' found in multiple registries: %s. "
+            "Use @registry/%s to specify." % (name, registries, name)
+        )
 
 
 class Recipe:
@@ -155,13 +236,15 @@ class Recipe:
     def __init__(self, data: dict[str, Any], source_path: str | None = None):
         self._raw = data
         self.source_path = source_path
+        self.source_registry: str | None = None  # set by _load_recipe after resolution
+        self.source_registry_url: str | None = None  # set by _load_recipe after resolution
 
         # Detect version
-        self.sparkrun_version = str(data.get("sparkrun_version", data.get("recipe_version", "2")))
+        self.recipe_version = str(data.get("recipe_version", "2"))
 
         # Core fields — name defaults to source filename stem if not provided
         default_name = Path(source_path).stem if source_path else "unnamed"
-        self.name: str = data.get("name", default_name)
+        self.name: str = default_name  # data.get("name", default_name)
         self.description: str = data.get("description", "")
         self.model: str = data.get("model", "")
         self.model_revision: str | None = data.get("model_revision")
@@ -202,10 +285,10 @@ class Recipe:
         self.metadata: dict[str, Any] = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
 
         # Metadata values supplement missing top-level fields
-        if not self.name or self.name == default_name:
-            meta_name = self.metadata.get("name")
-            if meta_name:
-                self.name = str(meta_name)
+        # if not self.name or self.name == default_name:
+        #     meta_name = self.metadata.get("name")
+        #     if meta_name:
+        #         self.name = str(meta_name)
         if not self.description:
             meta_desc = self.metadata.get("description")
             if meta_desc:
@@ -244,12 +327,6 @@ class Recipe:
         base.setdefault("model", self.model)
         return vpd_chain(cli_overrides or {}, user_config or {}, base)
 
-    # Matches a backslash followed by trailing whitespace before a newline.
-    # In bash, ``\<newline>`` is a line continuation but ``\ <newline>`` is
-    # an escaped space — a common YAML editing mistake that silently breaks
-    # multi-line commands.
-    _TRAILING_SPACE_CONTINUATION_RE = re.compile(r"\\ +\n")
-
     def render_command(self, config_chain: VirtualPathDictChain) -> str | None:
         """Render the command template with values from the config chain.
 
@@ -269,7 +346,7 @@ class Recipe:
 
         # Fix trailing spaces after backslash line-continuations.
         # ``\<space><newline>`` → ``\<newline>``
-        rendered = self._TRAILING_SPACE_CONTINUATION_RE.sub("\\\n", rendered)
+        rendered = _TRAILING_SPACE_CONTINUATION_RE.sub("\\\n", rendered)
 
         return rendered
 
@@ -413,7 +490,7 @@ class Recipe:
         gpu_mem_val = config.get("gpu_memory_utilization")
         gpu_memory_utilization = float(gpu_mem_val) if gpu_mem_val is not None else None
 
-        return _estimate_vram(
+        result = _estimate_vram(
             model_params=model_params,
             model_dtype=str(model_dtype) if model_dtype else None,
             kv_dtype=str(kv_dtype) if kv_dtype else None,
@@ -427,82 +504,290 @@ class Recipe:
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
+        # Write back auto-detected values so downstream consumers
+        # (e.g. benchmark result export) can use them without re-fetching.
+        if model_dtype and "model_dtype" not in self.metadata:
+            self.metadata["model_dtype"] = str(model_dtype)
+        if num_layers is not None and "num_layers" not in self.metadata:
+            self.metadata["num_layers"] = int(num_layers)
+        if num_kv_heads is not None and "num_kv_heads" not in self.metadata:
+            self.metadata["num_kv_heads"] = int(num_kv_heads)
+        if head_dim is not None and "head_dim" not in self.metadata:
+            self.metadata["head_dim"] = int(head_dim)
+        if model_params is not None and "model_params" not in self.metadata:
+            self.metadata["model_params"] = model_params
+
+        return result
+
     def __repr__(self) -> str:
         return "Recipe(name=%r, runtime=%r, model=%r)" % (self.name, self.runtime, self.model)
 
+    # Preferred key ordering for export.  Entries are either exact key names
+    # or fnmatch-style patterns (e.g. "model*" matches "model", "model_revision").
+    # Keys not listed here are appended alphabetically after the last group.
+    EXPORT_KEY_ORDER: list[str] = [
+        'recipe_version',
+        "model*",
+        "runtime*",
+        "min_nodes", "max_nodes",
+        "container",
+        "solo_only", "cluster_only",
+        "metadata",
+        "defaults",
+        "env",
+        "command",
+    ]
+
+    # Top-level keys that are folded into metadata on export.
+    _METADATA_PROMOTED_KEYS = {"description", "maintainer"}
+
+    def _build_export_dict(self) -> dict[str, Any]:
+        """Build a canonical recipe dict from resolved instance attributes.
+
+        Applies normalizations performed by the constructor and resolvers:
+        - Uses resolved ``runtime`` (e.g. ``"vllm-distributed"`` not ``"vllm"``).
+        - Folds top-level ``description`` into ``metadata.description``.
+        - Omits empty/default-valued fields to keep output minimal.
+        - Drops v1-only and internal keys (``recipe_version``, ``sparkrun_version``,
+          ``name``, ``mode``, ``runtime_config``, unknown sweep keys).
+        """
+        d: dict[str, Any] = {
+            'recipe_version': self.recipe_version,
+            "model": self.model
+        }
+
+        # -- Core fields (always present) --
+        if self.model_revision:
+            d["model_revision"] = self.model_revision
+        d["runtime"] = self._raw.get('runtime', self.runtime)  # use bare original if given
+        if self.runtime_version:
+            d["runtime_version"] = self.runtime_version
+
+        # -- Topology --
+        if self.min_nodes != 1:
+            d["min_nodes"] = self.min_nodes
+        if self.max_nodes is not None:
+            d["max_nodes"] = self.max_nodes
+
+        # -- Container --
+        if self.container:
+            d["container"] = self.container
+
+        # -- Preserve Raw Topology flags from v1 --
+        if self._raw.get("solo_only"):
+            d["solo_only"] = True
+        if self._raw.get("cluster_only"):
+            d["cluster_only"] = True
+
+        # -- Metadata (absorb promoted keys) --
+        meta = dict(self.metadata)
+        if self.description:
+            meta["description"] = self.description
+        if self.maintainer:
+            meta["maintainer"] = self.maintainer
+
+        # transfer SELECTED model parameters to recipe
+        if meta and meta.get('model_dtype', None) is not None:
+            meta['model_dtype'] = str(meta['model_dtype'])
+        # TODO: kv_dtype should be included and reflect command overrides on kv dtype not just hf auto-detect
+        # if meta and meta.get('kv_dtype', None) is not None:
+        #     meta['kv_dtype'] = str(meta['kv_dtype'])
+        if meta and meta.get('model_params', None) is not None:
+            meta['model_params'] = str(meta['model_params'])
+
+        # -- Configuration --
+        if self.defaults:
+            d["defaults"] = dict(self.defaults)
+        if self.env:
+            d["env"] = dict(self.env)
+        if self.command:
+            d["command"] = self.command
+
+        # TODO: consider if we include embedded benchmarks in export or not!
+        #       (currently we do not)
+
+        return d
+
+    def export(self, path: Optional[str | Path]) -> Optional[str]:
+        """Export the recipe as canonical YAML.
+
+        Builds a clean dict from resolved attributes (not raw input),
+        applies preferred key ordering, and writes YAML.
+        """
+        export_dict = self._build_export_dict()
+        ordered = _sort_dict_by_patterns(export_dict, self.EXPORT_KEY_ORDER)
+        recipe_text = yaml.safe_dump(ordered, indent=2, sort_keys=False)
+        if path is None:
+            return recipe_text
+        Path(path).write_text(recipe_text, encoding="utf-8")
+        return None
+
 
 def find_recipe(name: str, search_paths: list[Path] | None = None,
-                registry_manager: RegistryManager | None = None) -> Path:
+                registry_manager: RegistryManager | None = None,
+                local_files: list[Path] | None = None) -> Path:
     """Find a recipe by name across search paths.
 
+    Supports @registry/recipe-name syntax for scoped lookups.
+
     Search order:
-    1. Exact/relative file path (if exists)
-    2. Given search paths
-    3. Registry paths (if registry_manager provided)
-    4. Registry file-stem matching (if registry_manager provided)
+    1. @registry/name scoped lookup (if @ prefix present)
+    2. Exact/relative file path (if exists)
+    3. Given search paths
+    4. Registry paths (if registry_manager provided)
+    5. Registry file-stem matching (if registry_manager provided)
+
+    Raises:
+        RecipeAmbiguousError: If name matches multiple registries without @scope.
+        RecipeError: If recipe not found.
     """
+    # Parse @registry/name prefix
+    from sparkrun.utils import parse_scoped_name
+    scoped_registry, lookup_name = parse_scoped_name(name)
+
+    # Scoped lookup: search only the specified registry
+    if scoped_registry and registry_manager:
+        matches = registry_manager.find_recipe_in_registries(
+            lookup_name, include_hidden=True,
+        )
+        scoped_matches = [(reg, path) for reg, path in matches if reg == scoped_registry]
+        if scoped_matches:
+            return scoped_matches[0][1]
+        raise RecipeError(
+            "Recipe '%s' not found in registry '%s'" % (lookup_name, scoped_registry)
+        )
+
     # 1. Check if it's a direct path
-    direct = Path(name)
+    direct = Path(lookup_name)
     if direct.exists():
         return direct
     # Also try with .yaml extension
-    if not name.endswith((".yaml", ".yml")):
+    if not lookup_name.endswith((".yaml", ".yml")):
         for ext in (".yaml", ".yml"):
-            candidate = Path(name + ext)
+            candidate = Path(lookup_name + ext)
             if candidate.exists():
                 return candidate
 
-    # 2. Search user-provided paths (flat first, then recursive by stem)
+    # 2. Check local_files (CWD-discovered recipes) by stem match
+    if local_files:
+        for lf in local_files:
+            if lf.stem == lookup_name:
+                return lf
+        # Also try with extension stripped if user passed name.yaml
+        if lookup_name.endswith((".yaml", ".yml")):
+            bare = Path(lookup_name).stem
+            for lf in local_files:
+                if lf.stem == bare:
+                    return lf
+
+    # 3. Search user-provided paths (flat first, then recursive by stem)
     for search_dir in (search_paths or []):
         for ext in ("", ".yaml", ".yml"):
-            candidate = search_dir / (name + ext)
+            candidate = search_dir / (lookup_name + ext)
             if candidate.exists():
                 return candidate
     for search_dir in (search_paths or []):
         for ext in (".yaml", ".yml"):
-            for m in search_dir.rglob(f"**/{name}{ext}"):
+            for m in search_dir.rglob(f"**/{lookup_name}{ext}"):
                 return m
 
-    # 3. Search registry paths (flat first, then recursive by stem)
+    # 4. Search registry paths with ambiguity detection.
+    # Use find_recipe_in_registries() which tracks per-registry matches
+    # so that identical recipe names across registries raise an error.
     if registry_manager:
-        for search_dir in registry_manager.get_recipe_paths():
-            for ext in ("", ".yaml", ".yml"):
-                candidate = search_dir / (name + ext)
-                if candidate.exists():
-                    return candidate
-        for search_dir in registry_manager.get_recipe_paths():
-            for ext in (".yaml", ".yml"):
-                for m in search_dir.rglob(f"**/{name}{ext}"):
-                    return m
-
-    # 4. Try registry file-stem matching
-    if registry_manager:
-        matches = registry_manager.find_recipe_in_registries(name)
-        if matches:
-            # Return first match (user search paths already checked above)
+        matches = registry_manager.find_recipe_in_registries(lookup_name)
+        if len(matches) == 1:
             _registry_name, recipe_path = matches[0]
             return recipe_path
+        elif len(matches) > 1:
+            raise RecipeAmbiguousError(lookup_name, matches)
 
     search_desc = [str(p) for p in (search_paths or [])]
     if registry_manager:
         search_desc.append("registry paths")
     raise RecipeError(
         "Recipe '%s' not found. Searched: %s"
-        % (name, search_desc)
+        % (lookup_name, search_desc)
     )
 
 
+def find_recipe_in_registry(name: str, registry_name: str,
+                            registry_manager: RegistryManager) -> Path:
+    """Find a recipe in a specific registry by name.
+
+    Args:
+        name: Recipe file stem.
+        registry_name: Registry to search.
+        registry_manager: Registry manager instance.
+
+    Returns:
+        Path to the recipe file.
+
+    Raises:
+        RecipeError: If recipe not found in that registry.
+    """
+    matches = registry_manager.find_recipe_in_registries(name, include_hidden=True)
+    for reg, path in matches:
+        if reg == registry_name:
+            return path
+    raise RecipeError("Recipe '%s' not found in registry '%s'" % (name, registry_name))
+
+
+def recipe_summary(path: Path, registry_name: str | None = None) -> dict[str, Any] | None:
+    """Build a lightweight recipe summary dict from a YAML file.
+
+    Returns a metadata dict suitable for recipe listing and search, or
+    ``None`` if the file cannot be read or does not contain a dict.
+
+    This is intentionally cheaper than constructing a full :class:`Recipe`
+    — it skips version migration, resolver chains, and env expansion.
+    """
+    try:
+        data = read_yaml(str(path))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    stem = path.stem
+    defaults = data.get("defaults", {})
+    entry: dict[str, Any] = {
+        "name": stem,
+        "file": stem,
+        "path": str(path),
+        "model": data.get("model", ""),
+        "description": data.get("description", ""),
+        "runtime": resolve_runtime(data),
+        "min_nodes": data.get("min_nodes", 1),
+        "tp": defaults.get("tensor_parallel", "") if isinstance(defaults, dict) else "",
+        "gpu_mem": defaults.get("gpu_memory_utilization", "") if isinstance(defaults, dict) else "",
+    }
+    if registry_name:
+        entry["registry"] = registry_name
+    return entry
+
+
 def list_recipes(search_paths: list[Path] | None = None,
-                 registry_manager: RegistryManager | None = None) -> list[dict[str, str]]:
+                 registry_manager: RegistryManager | None = None,
+                 include_hidden: bool = False,
+                 local_files: list[Path] | None = None) -> list[dict[str, Any]]:
     """List all available recipes with name and path."""
-    recipes = []
+    recipes: list[dict[str, Any]] = []
     seen_names: set[str] = set()
+
+    # Process CWD-discovered local files first (no registry label)
+    for f in (local_files or []):
+        if f.stem in seen_names:
+            continue
+        seen_names.add(f.stem)
+        entry = recipe_summary(f)
+        if entry is not None:
+            recipes.append(entry)
 
     all_paths = list(search_paths or [])
 
     # Add registry paths if available
     if registry_manager:
-        all_paths.extend(registry_manager.get_recipe_paths())
+        all_paths.extend(registry_manager.get_recipe_paths(include_hidden=include_hidden))
 
     for search_dir in all_paths:
         if not search_dir.is_dir():
@@ -519,28 +804,12 @@ def list_recipes(search_paths: list[Path] | None = None,
                         break
 
         for f in sorted(search_dir.rglob("*.yaml")):
-            stem = f.stem
-            if stem not in seen_names:
-                seen_names.add(stem)
-                try:
-                    data = read_yaml(str(f))
-                    entry = {
-                        "name": data.get("name", stem) if isinstance(data, dict) else stem,
-                        "file": stem,
-                        "path": str(f),
-                        "runtime": resolve_runtime(data) if isinstance(data, dict) else "unknown",
-                    }
-                    if isinstance(data, dict):
-                        entry["min_nodes"] = data.get("min_nodes", '1')
-                        defaults = data.get("defaults", {})
-                        if isinstance(defaults, dict):
-                            entry["tp"] = defaults.get("tensor_parallel", "")
-                            entry["gpu_mem"] = defaults.get("gpu_memory_utilization", "")
-                    if registry_name:
-                        entry["registry"] = registry_name
+            if f.stem not in seen_names:
+                seen_names.add(f.stem)
+                entry = recipe_summary(f, registry_name=registry_name)
+                if entry is not None:
                     recipes.append(entry)
-                except Exception:
-                    logger.debug("Skipping invalid recipe file: %s", f)
+
     return recipes
 
 

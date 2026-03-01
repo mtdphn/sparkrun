@@ -11,7 +11,7 @@ from vpd.next.util import read_yaml
 
 if TYPE_CHECKING:
     from scitrera_app_framework import Variables
-    from sparkrun.registry import RegistryManager
+    from sparkrun.core.registry import RegistryManager
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,14 @@ class SparkrunConfig:
 
     @property
     def ssh_user(self) -> str | None:
+        if hasattr(self, "_ssh_user_override"):
+            return self._ssh_user_override
         ssh = self._data.get("ssh", {})
         return ssh.get("user")
+
+    @ssh_user.setter
+    def ssh_user(self, value: str | None) -> None:
+        self._ssh_user_override = value
 
     @property
     def ssh_key(self) -> str | None:
@@ -123,7 +129,7 @@ class SparkrunConfig:
 
     def get_registry_manager(self) -> 'RegistryManager':
         """Create a RegistryManager using the config root and cache dir."""
-        from sparkrun.registry import RegistryManager
+        from sparkrun.core.registry import RegistryManager
         return RegistryManager(
             config_root=self.config_path.parent if self.config_path else DEFAULT_CONFIG_DIR,
             cache_root=self.cache_dir / "registries",
