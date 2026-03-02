@@ -35,6 +35,7 @@
 #   gpu_power_limit_w   GPU power limit in watts
 #   gpu_clock_mhz       GPU SM clock speed in MHz
 #   gpu_mem_clock_mhz   GPU memory clock speed in MHz
+#   sparkrun_jobs       Number of running sparkrun_ containers
 
 set -uo pipefail
 
@@ -161,6 +162,11 @@ clean() {
     echo "$1" | sed 's/^ *//;s/ *$//;s/\[N\/A\]//'
 }
 
+# Count running Docker containers whose name starts with "sparkrun_".
+count_sparkrun_jobs() {
+    docker ps --filter "name=^sparkrun_" --format "{{.ID}}" 2>/dev/null | wc -l | tr -d ' '
+}
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -220,15 +226,19 @@ while true; do
         gpu_mem_clock=""
     fi
 
+    # Sparkrun container count
+    sparkrun_jobs=$(count_sparkrun_jobs)
+
     # Emit CSV row
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$ts" "$hn" "$uptime_sec" \
         "$load1" "$load5" "$load15" \
         "$cpu_pct" "$cpu_freq" "$cpu_temp" \
         "$mem_total" "$mem_used" "$mem_avail" "$mem_pct" \
         "$swap_total" "$swap_used" \
         "$gpu_name" "$gpu_util" "$gpu_mem_used" "$gpu_mem_total" "$gpu_mem_pct" \
-        "$gpu_temp" "$gpu_power" "$gpu_power_limit" "$gpu_clock" "$gpu_mem_clock"
+        "$gpu_temp" "$gpu_power" "$gpu_power_limit" "$gpu_clock" "$gpu_mem_clock" \
+        "$sparkrun_jobs"
 
     # Sleep, then sample CPU counters for the next iteration's cpu_usage_pct
     sleep "$INTERVAL"
