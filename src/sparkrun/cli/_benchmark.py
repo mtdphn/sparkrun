@@ -45,6 +45,8 @@ DEFAULT_BENCHMARK_TIMEOUT: int = 14400  # 4 hours
               help="Output file for results YAML")
 @click.option("-o", "--option", "options", multiple=True,
               help="Override benchmark arg: -o key=value (repeatable)")
+@click.option("--exit-on-first-fail/--no-exit-on-first-fail", "exit_on_first_fail", default=True,
+              help="Abort benchmark on first failure and skip saving results (default: enabled)")
 @click.option("--no-stop", is_flag=True, help="Don't stop inference after benchmarking")
 @click.option("--skip-run", is_flag=True, help="Skip launching inference (benchmark existing instance)")
 @click.option("--sync-tuning", is_flag=True, help="Sync tuning configs from registries before benchmarking")
@@ -54,8 +56,8 @@ DEFAULT_BENCHMARK_TIMEOUT: int = 14400  # 4 hours
 @click.pass_context
 def benchmark(ctx, recipe_name, hosts, hosts_file, cluster_name, solo,
               tensor_parallel, port, image, cache_dir, profile, framework,
-              output_file, options, no_stop, skip_run, sync_tuning,
-              bench_timeout, dry_run):
+              output_file, options, exit_on_first_fail, no_stop, skip_run,
+              sync_tuning, bench_timeout, dry_run):
     """Benchmark an inference recipe.
 
     Runs the full benchmark flow: launch inference, run benchmark, stop
@@ -80,16 +82,16 @@ def benchmark(ctx, recipe_name, hosts, hosts_file, cluster_name, solo,
     _run_benchmark(
         ctx, recipe_name, hosts, hosts_file, cluster_name, solo,
         tensor_parallel, port, image, cache_dir, profile, framework,
-        output_file, options, no_stop, skip_run, sync_tuning,
-        bench_timeout, dry_run,
+        output_file, options, exit_on_first_fail, no_stop, skip_run,
+        sync_tuning, bench_timeout, dry_run,
     )
 
 
 def _run_benchmark(
         ctx, recipe_name, hosts, hosts_file, cluster_name, solo,
         tensor_parallel, port, image, cache_dir, profile, framework_name,
-        output_file, options, no_stop, skip_run, sync_tuning,
-        bench_timeout, dry_run,
+        output_file, options, exit_on_first_fail, no_stop, skip_run,
+        sync_tuning, bench_timeout, dry_run,
 ):
     """Execute the full benchmark flow: launch inference -> benchmark -> stop."""
     from sparkrun.benchmarking.base import export_results
@@ -169,6 +171,10 @@ def _run_benchmark(
             sys.exit(1)
         key, _, val = opt_str.partition("=")
         bench_args[key.strip()] = fw.interpret_arg(key.strip(), val.strip())
+
+    # Inject --exit-on-first-fail into bench args when the CLI flag is set
+    if exit_on_first_fail:
+        bench_args["exit_on_first_fail"] = True
 
     # Resolve effective timeout: CLI override > spec timeout > default
     effective_timeout = bench_timeout or (bench_spec.timeout if bench_spec else None) or DEFAULT_BENCHMARK_TIMEOUT
@@ -493,6 +499,14 @@ def _run_benchmark(
                     click.echo("Warning: benchmark exited with code %d (%.0fs elapsed)" % (proc.returncode, elapsed), err=True)
                     if stderr_text:
                         click.echo("stderr: %s" % stderr_text[:500], err=True)
+                    if exit_on_first_fail:
+                        click.echo("Skipping result export (--exit-on-first-fail set and benchmark failed).", err=True)
+                        if launched and not no_stop:
+                            click.echo("")
+                            click.echo("Stopping inference...")
+                            _stop_inference(runtime, host_list, cluster_id, config, dry_run)
+                            click.echo("Inference stopped.")
+                        sys.exit(proc.returncode)
                 else:
                     click.echo("Benchmark completed successfully (%.0fs elapsed)." % elapsed)
             except subprocess.TimeoutExpired:

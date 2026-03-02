@@ -23,6 +23,7 @@ _BOOL_ARGS = {
     "no_cache", "enable_prefix_caching", "no_warmup", "skip_coherence",
     "adapt_prompt", "no_adapt_prompt",
     "save_total_throughput_timeseries", "save_all_throughput_timeseries",
+    "exit_on_first_fail",
 }
 
 # Common shorthand aliases → canonical llama-benchy arg names.
