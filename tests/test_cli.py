@@ -2497,3 +2497,53 @@ class TestClusterUserInCLICommands:
         ])
         assert result.exit_code == 0
         assert captured_config.get("ssh_user") == "labadmin"
+
+
+# ---------------------------------------------------------------------------
+# Top-level 'update' alias tests
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateCommand:
+    """Test the top-level 'sparkrun update' command."""
+
+    def test_update_no_uv(self, runner, monkeypatch):
+        """update skips self-upgrade when uv is not on PATH and runs registry update."""
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        with mock.patch("sparkrun.cli._registry.registry_update") as mock_reg:
+            # Make the Click command callable via ctx.invoke by wrapping
+            mock_reg.return_value = None
+            result = runner.invoke(main, ["update"])
+        assert result.exit_code == 0
+        assert "uv not found" in result.output
+
+    def test_update_not_uv_tool_install(self, runner, monkeypatch):
+        """update skips self-upgrade when sparkrun is not a uv tool install."""
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+        with mock.patch("subprocess.run") as mock_run:
+            # uv tool list succeeds but sparkrun not listed
+            mock_run.return_value = mock.Mock(returncode=0, stdout="some-other-tool\n", stderr="")
+            result = runner.invoke(main, ["update"])
+        assert result.exit_code == 0
+        assert "not installed via uv" in result.output
+
+    def test_update_uv_upgrade_succeeds(self, runner, monkeypatch):
+        """update performs uv upgrade and shells out for registry update."""
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1:3] == ["tool", "list"]:
+                return mock.Mock(returncode=0, stdout="sparkrun v1.0.0\n", stderr="")
+            if cmd[1:3] == ["tool", "upgrade"]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if cmd == ["sparkrun", "--version"]:
+                return mock.Mock(returncode=0, stdout="sparkrun, version 1.1.0", stderr="")
+            if cmd == ["sparkrun", "registry", "update"]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            result = runner.invoke(main, ["update"])
+        assert result.exit_code == 0
+        assert "-> 1.1.0" in result.output
+        assert "Updating recipe registries" in result.output
