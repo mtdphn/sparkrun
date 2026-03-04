@@ -1384,3 +1384,353 @@ class TestLlamaCppFollowLogs:
         args = mock_stream.call_args
         assert args[0][0] == "10.0.0.1"
         assert args[0][1] == "mycluster_head"
+
+
+# --- compute_required_nodes Tests ---
+
+class TestComputeRequiredNodes:
+    """Test base RuntimePlugin.compute_required_nodes()."""
+
+    def _make_recipe(self, defaults=None):
+        data = {
+            "name": "test", "runtime": "vllm",
+            "model": "meta-llama/Llama-2-7b-hf",
+        }
+        if defaults:
+            data["defaults"] = defaults
+        return Recipe.from_dict(data)
+
+    def test_returns_tp_value(self):
+        """Base class returns tensor_parallel as required nodes."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 4})
+        runtime = _StubRuntime()
+        assert runtime.compute_required_nodes(recipe) == 4
+
+    def test_returns_none_when_no_tp(self):
+        """Returns None when tensor_parallel is not set."""
+        recipe = self._make_recipe()
+        runtime = _StubRuntime()
+        assert runtime.compute_required_nodes(recipe) is None
+
+    def test_overrides_take_precedence(self):
+        """CLI overrides override recipe defaults."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 2})
+        runtime = _StubRuntime()
+        assert runtime.compute_required_nodes(recipe, {"tensor_parallel": 8}) == 8
+
+    def test_returns_none_with_empty_overrides(self):
+        """Empty overrides don't change None result."""
+        recipe = self._make_recipe()
+        runtime = _StubRuntime()
+        assert runtime.compute_required_nodes(recipe, {}) is None
+
+
+class TestSglangComputeRequiredNodes:
+    """Test SglangRuntime.compute_required_nodes() with PP support."""
+
+    def _make_recipe(self, defaults=None):
+        data = {
+            "name": "test", "runtime": "sglang",
+            "model": "meta-llama/Llama-2-7b-hf",
+        }
+        if defaults:
+            data["defaults"] = defaults
+        return Recipe.from_dict(data)
+
+    def test_tp_only(self):
+        """TP=4, no PP → requires 4 nodes."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 4})
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(recipe) == 4
+
+    def test_tp_times_pp(self):
+        """TP=2, PP=2 → requires 4 nodes."""
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "pipeline_parallel": 2,
+        })
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(recipe) == 4
+
+    def test_pp_only(self):
+        """PP=3 with no explicit TP → 1*3 = 3 nodes."""
+        recipe = self._make_recipe(defaults={"pipeline_parallel": 3})
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(recipe) == 3
+
+    def test_no_parallelism_returns_none(self):
+        """Neither TP nor PP set → None."""
+        recipe = self._make_recipe()
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(recipe) is None
+
+    def test_overrides_pp(self):
+        """CLI overrides PP value."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 2})
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(
+            recipe, {"pipeline_parallel": 3}
+        ) == 6
+
+    def test_overrides_both(self):
+        """CLI overrides both TP and PP."""
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "pipeline_parallel": 2,
+        })
+        runtime = SglangRuntime()
+        assert runtime.compute_required_nodes(
+            recipe, {"tensor_parallel": 4, "pipeline_parallel": 3}
+        ) == 12
+
+
+class TestTrtllmComputeRequiredNodes:
+    """Test TrtllmRuntime inherits base TP-only behavior."""
+
+    def _make_recipe(self, defaults=None):
+        data = {
+            "name": "test", "runtime": "trtllm",
+            "model": "meta-llama/Llama-2-7b-hf",
+        }
+        if defaults:
+            data["defaults"] = defaults
+        return Recipe.from_dict(data)
+
+    def test_returns_tp_only(self):
+        """TRT-LLM uses base class (TP only) for now."""
+        from sparkrun.runtimes.trtllm import TrtllmRuntime
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "pipeline_parallel": 2,
+        })
+        runtime = TrtllmRuntime()
+        # Base class only reads TP, ignores PP
+        assert runtime.compute_required_nodes(recipe) == 2
+
+    def test_returns_none_when_no_tp(self):
+        """No TP → None (even if PP is set)."""
+        from sparkrun.runtimes.trtllm import TrtllmRuntime
+        recipe = self._make_recipe(defaults={"pipeline_parallel": 2})
+        runtime = TrtllmRuntime()
+        assert runtime.compute_required_nodes(recipe) is None
+
+
+def test_sglang_pp_size_in_generated_command():
+    """SGLang --pp-size flag appears in generated command."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "meta-llama/Llama-2-70b-hf",
+        "runtime": "sglang",
+        "defaults": {
+            "tensor_parallel": 2,
+            "pipeline_parallel": 2,
+        },
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = SglangRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert "--pp-size 2" in cmd
+    assert "--tp-size 2" in cmd
+
+
+def test_sglang_pp_size_override_in_command():
+    """SGLang --pp-size from overrides appears in generated command."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "meta-llama/Llama-2-70b-hf",
+        "runtime": "sglang",
+        "defaults": {"tensor_parallel": 2},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = SglangRuntime()
+
+    cmd = runtime.generate_command(recipe, {"pipeline_parallel": 3}, is_cluster=False)
+    assert "--pp-size 3" in cmd
+    assert "--tp-size 2" in cmd
+
+
+# --- llama.cpp TP/PP split-mode tests ---
+
+class TestLlamaCppComputeRequiredNodes:
+    """Test LlamaCppRuntime.compute_required_nodes() — TP/PP are mutually exclusive."""
+
+    def _make_recipe(self, defaults=None):
+        data = {
+            "name": "test", "runtime": "llama-cpp",
+            "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        }
+        if defaults:
+            data["defaults"] = defaults
+        return Recipe.from_dict(data)
+
+    def test_tp_returns_tp(self):
+        """TP=4 → 4 nodes (split_mode=row)."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 4})
+        runtime = LlamaCppRuntime()
+        assert runtime.compute_required_nodes(recipe) == 4
+
+    def test_pp_returns_pp(self):
+        """PP=3 → 3 nodes (split_mode=layer)."""
+        recipe = self._make_recipe(defaults={"pipeline_parallel": 3})
+        runtime = LlamaCppRuntime()
+        assert runtime.compute_required_nodes(recipe) == 3
+
+    def test_neither_returns_none(self):
+        """No TP/PP → None."""
+        recipe = self._make_recipe()
+        runtime = LlamaCppRuntime()
+        assert runtime.compute_required_nodes(recipe) is None
+
+    def test_both_raises_value_error(self):
+        """TP + PP simultaneously → ValueError."""
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "pipeline_parallel": 2,
+        })
+        runtime = LlamaCppRuntime()
+        with pytest.raises(ValueError, match="simultaneously"):
+            runtime.compute_required_nodes(recipe)
+
+    def test_overrides_tp(self):
+        """CLI --tp override."""
+        recipe = self._make_recipe()
+        runtime = LlamaCppRuntime()
+        assert runtime.compute_required_nodes(recipe, {"tensor_parallel": 2}) == 2
+
+    def test_overrides_pp(self):
+        """CLI --pp override."""
+        recipe = self._make_recipe()
+        runtime = LlamaCppRuntime()
+        assert runtime.compute_required_nodes(recipe, {"pipeline_parallel": 4}) == 4
+
+    def test_override_conflicts_with_default_raises(self):
+        """Recipe has TP, CLI passes PP → conflict → ValueError."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 2})
+        runtime = LlamaCppRuntime()
+        with pytest.raises(ValueError, match="simultaneously"):
+            runtime.compute_required_nodes(recipe, {"pipeline_parallel": 2})
+
+
+class TestLlamaCppSplitModeCommand:
+    """Test that TP/PP correctly inject --split-mode in llama-server commands."""
+
+    def _make_recipe(self, defaults=None, command=None):
+        data = {
+            "name": "test", "runtime": "llama-cpp",
+            "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        }
+        if defaults:
+            data["defaults"] = defaults
+        if command:
+            data["command"] = command
+        return Recipe.from_dict(data)
+
+    def test_tp_generates_split_mode_row(self):
+        """--tp → --split-mode row in generated command."""
+        recipe = self._make_recipe(defaults={"tensor_parallel": 2, "port": 8080})
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode row" in cmd
+        assert "--split-mode layer" not in cmd
+
+    def test_pp_generates_split_mode_layer(self):
+        """--pp → --split-mode layer in generated command."""
+        recipe = self._make_recipe(defaults={"pipeline_parallel": 4, "port": 8080})
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode layer" in cmd
+        assert "--split-mode row" not in cmd
+
+    def test_neither_uses_default_layer(self):
+        """No TP/PP → default split_mode=layer from _LLAMA_CPP_DEFAULTS."""
+        recipe = self._make_recipe(defaults={"port": 8080})
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode layer" in cmd
+
+    def test_tp_override_generates_row(self):
+        """CLI override tensor_parallel → --split-mode row."""
+        recipe = self._make_recipe(defaults={"port": 8080})
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {"tensor_parallel": 2}, is_cluster=False)
+        assert "--split-mode row" in cmd
+
+    def test_pp_override_generates_layer(self):
+        """CLI override pipeline_parallel → --split-mode layer."""
+        recipe = self._make_recipe(defaults={"port": 8080})
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {"pipeline_parallel": 2}, is_cluster=False)
+        assert "--split-mode layer" in cmd
+
+    def test_tp_overrides_recipe_split_mode(self):
+        """TP takes precedence over recipe split_mode=layer."""
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "split_mode": "layer",
+        })
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode row" in cmd
+        assert "--split-mode layer" not in cmd
+
+    def test_both_tp_pp_raises_in_generate(self):
+        """Both TP and PP raises ValueError in generate_command too."""
+        recipe = self._make_recipe(defaults={
+            "tensor_parallel": 2, "pipeline_parallel": 2,
+        })
+        runtime = LlamaCppRuntime()
+        with pytest.raises(ValueError, match="simultaneously"):
+            runtime.generate_command(recipe, {}, is_cluster=False)
+
+    def test_template_split_mode_overridden_by_tp(self):
+        """Command template with --split-mode layer is overridden by TP → row."""
+        recipe = self._make_recipe(
+            defaults={"tensor_parallel": 2},
+            command="llama-server -hf {model} --split-mode layer --port 8080",
+        )
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode row" in cmd
+        assert "--split-mode layer" not in cmd
+
+    def test_template_split_mode_overridden_by_pp(self):
+        """Command template with --split-mode row is overridden by PP → layer."""
+        recipe = self._make_recipe(
+            defaults={"pipeline_parallel": 4},
+            command="llama-server -hf {model} --split-mode row --port 8080",
+        )
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode layer" in cmd
+        assert "--split-mode row" not in cmd
+
+    def test_template_no_tp_pp_preserves_existing_split_mode(self):
+        """Template with --split-mode is preserved when no TP/PP set."""
+        recipe = self._make_recipe(
+            command="llama-server -hf {model} --split-mode row --port 8080",
+        )
+        runtime = LlamaCppRuntime()
+        cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+        assert "--split-mode row" in cmd
+
+
+class TestLlamaCppValidateRecipe:
+    """Test validate_recipe catches TP+PP conflict in recipe defaults."""
+
+    def test_both_tp_pp_in_defaults_warns(self):
+        recipe_data = {
+            "name": "test", "runtime": "llama-cpp",
+            "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+            "defaults": {"tensor_parallel": 2, "pipeline_parallel": 2},
+        }
+        recipe = Recipe.from_dict(recipe_data)
+        runtime = LlamaCppRuntime()
+        issues = runtime.validate_recipe(recipe)
+        assert any("mutually exclusive" in i for i in issues)
+
+    def test_tp_only_no_warning(self):
+        recipe_data = {
+            "name": "test", "runtime": "llama-cpp",
+            "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+            "defaults": {"tensor_parallel": 2},
+        }
+        recipe = Recipe.from_dict(recipe_data)
+        runtime = LlamaCppRuntime()
+        issues = runtime.validate_recipe(recipe)
+        assert not any("mutually exclusive" in i for i in issues)

@@ -200,6 +200,18 @@ class RuntimePlugin(Plugin):
         """
         return {}
 
+    def get_extra_docker_opts(self) -> list[str]:
+        """Return additional ``docker run`` options for this runtime.
+
+        Override in subclasses to inject runtime-specific docker flags
+        (e.g. ulimit settings).  Called by ``_run_solo`` and
+        ``_generate_node_script``.
+
+        Returns:
+            List of extra docker CLI arguments (empty by default).
+        """
+        return []
+
     def validate_recipe(self, recipe: Recipe) -> list[str]:
         """Return list of warnings/errors for runtime-specific fields.
 
@@ -211,6 +223,27 @@ class RuntimePlugin(Plugin):
         if not recipe.model:
             issues.append("[%s] model is required" % self.runtime_name)
         return issues
+
+    def compute_required_nodes(self, recipe: Recipe, overrides: dict[str, Any] | None = None) -> int | None:
+        """Compute the number of nodes required to run this recipe.
+
+        The base implementation reads ``tensor_parallel`` from the
+        recipe config chain.  Subclasses override to account for
+        additional parallelism dimensions (e.g. pipeline parallelism).
+
+        Args:
+            recipe: The loaded recipe.
+            overrides: CLI override values (merged into config chain).
+
+        Returns:
+            Required node count, or ``None`` if no parallelism config
+            is set (meaning "use all provided hosts, no trimming").
+        """
+        config = recipe.build_config_chain(overrides or {})
+        tp_val = config.get("tensor_parallel")
+        if tp_val is None:
+            return None
+        return int(tp_val)
 
     @staticmethod
     def build_flags_from_map(
@@ -640,6 +673,7 @@ class RuntimePlugin(Plugin):
             env=all_env,
             volumes=volumes,
             nccl_env=nccl_env,
+            extra_docker_opts=self.get_extra_docker_opts() or None,
         )
         result = run_script_on_host(
             host, launch_script, ssh_kwargs=ssh_kwargs, timeout=120, dry_run=dry_run,
@@ -708,6 +742,7 @@ class RuntimePlugin(Plugin):
             env: dict[str, str] | None = None,
             volumes: dict[str, str] | None = None,
             nccl_env: dict[str, str] | None = None,
+            extra_docker_opts: list[str] | None = None,
     ) -> str:
         """Generate a script that launches a container with a direct entrypoint command.
 
@@ -723,6 +758,7 @@ class RuntimePlugin(Plugin):
             env: Additional environment variables.
             volumes: Volume mounts (host_path -> container_path).
             nccl_env: NCCL-specific environment variables.
+            extra_docker_opts: Additional ``docker run`` options.
 
         Returns:
             Complete bash script as a string.
@@ -739,6 +775,7 @@ class RuntimePlugin(Plugin):
             detach=True,
             env=all_env,
             volumes=volumes,
+            extra_opts=extra_docker_opts,
         )
 
         return (

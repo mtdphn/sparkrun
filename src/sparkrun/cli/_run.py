@@ -9,7 +9,7 @@ import click
 
 from ._common import (
     RECIPE_NAME,
-    _apply_tp_trimming,
+    _apply_node_trimming,
     _display_vram_estimate,
     _expand_recipe_shortcut,
     _is_recipe_url,
@@ -17,6 +17,7 @@ from ._common import (
     _parse_options,
     _resolve_cluster_cache_dir,
     _resolve_hosts_or_exit,
+    _resolve_transfer_mode,
     _setup_logging,
     _simplify_recipe_ref,
     dry_run_option,
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 @click.option("--solo", is_flag=True, help="Force single-node mode")
 @click.option("--port", type=int, default=None, help="Override serve port")
 @click.option("--tp", "--tensor-parallel", "tensor_parallel", type=int, default=None, help="Override tensor parallelism")
+@click.option("--pp", "--pipeline-parallel", "pipeline_parallel", type=int, default=None, help="Override pipeline parallelism")
 @click.option("--gpu-mem", type=float, default=None, help="Override GPU memory utilization")
 @click.option("--served-model-name", default=None, help="Override served model name")
 @click.option("--max-model-len", type=int, default=None, help="Override maximum model context length")
@@ -46,14 +48,19 @@ logger = logging.getLogger(__name__)
 @click.option("--foreground", is_flag=True, help="Run in foreground (don't detach)")
 @click.option("--no-follow", is_flag=True, help="Don't follow container logs after launch")
 @click.option("--no-sync-tuning", is_flag=True, help="Skip syncing tuning configs from registries")
+@click.option("--transfer-mode", default=None,
+              type=click.Choice(["auto", "local", "push", "delegated"], case_sensitive=False),
+              help="Resource transfer mode (overrides cluster setting)")
 # @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.option("--option", "-o", "options", multiple=True, help="Override any recipe default: -o key=value (repeatable)")
 @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 def run(
         ctx, recipe_name, hosts, hosts_file, cluster_name, solo, port, tensor_parallel,
-        gpu_mem, served_model_name, max_model_len, image, cache_dir, ray_port, init_port, dashboard, dashboard_port,
-        dry_run, foreground, no_follow, no_sync_tuning, options, extra_args, config_path=None, setup=True,
+        pipeline_parallel, gpu_mem, served_model_name, max_model_len, image, cache_dir,
+        ray_port, init_port, dashboard, dashboard_port,
+        dry_run, foreground, no_follow, no_sync_tuning, transfer_mode,
+        options, extra_args, config_path=None, setup=True,
 ):
     """Run an inference recipe.
 
@@ -99,6 +106,8 @@ def run(
         overrides["port"] = port
     if tensor_parallel is not None:
         overrides["tensor_parallel"] = tensor_parallel
+    if pipeline_parallel is not None:
+        overrides["pipeline_parallel"] = pipeline_parallel
     if gpu_mem is not None:
         overrides["gpu_memory_utilization"] = gpu_mem
     if served_model_name is not None:
@@ -139,26 +148,32 @@ def run(
         else:
             host_source = "localhost"
 
-    # Validate tensor_parallel vs host count
-    # On DGX Spark each host has 1 GPU, so tensor_parallel maps to node count.
+    # Validate required nodes vs host count.
+    # On DGX Spark each host has 1 GPU, so parallelism maps to node count.
+    # The runtime computes the required count from all parallelism dimensions
+    # (e.g. tp * pp for SGLang).
     if len(host_list) > 1 and not solo:
-        config_chain = recipe.build_config_chain(overrides)
-        tp_val = config_chain.get("tensor_parallel")
-        if tp_val is not None:
-            effective_tp = int(tp_val)
-            if effective_tp > len(host_list):
+        try:
+            required = runtime.compute_required_nodes(recipe, overrides)
+        except ValueError as e:
+            click.echo("Error: %s" % e, err=True)
+            sys.exit(1)
+        if required is not None:
+            if required > len(host_list):
                 click.echo(
-                    "Error: tensor_parallel=%d requires %d hosts, but only %d provided"
-                    % (effective_tp, effective_tp, len(host_list)),
+                    "Error: runtime requires %d nodes, but only %d hosts provided"
+                    % (required, len(host_list)),
                     err=True,
                 )
                 sys.exit(1)
-            elif effective_tp < len(host_list):
+            elif required < len(host_list):
                 original_count = len(host_list)
-                host_list = _apply_tp_trimming(host_list, recipe, overrides)
+                host_list = _apply_node_trimming(
+                    host_list, recipe, overrides, runtime=runtime,
+                )
                 click.echo(
-                    "Note: tensor_parallel=%d, using %d of %d hosts"
-                    % (effective_tp, effective_tp, original_count)
+                    "Note: %d nodes required, using %d of %d hosts"
+                    % (required, required, original_count)
                 )
 
     # Enforce max_nodes: trim host list if recipe caps node count.
@@ -207,6 +222,9 @@ def run(
     ib_ip_map: dict[str, str] = {}
     cluster_cache_dir = _resolve_cluster_cache_dir(cluster_name, hosts, hosts_file, cluster_mgr)
     effective_cache_dir = cache_dir or cluster_cache_dir or str(config.hf_cache_dir)
+    # Resolve transfer mode: CLI --transfer-mode > cluster setting > "auto"
+    cluster_transfer_mode = _resolve_transfer_mode(cluster_name, hosts, hosts_file, cluster_mgr)
+    effective_transfer_mode = transfer_mode or cluster_transfer_mode or "auto"
     if not runtime.is_delegating_runtime():
         from sparkrun.orchestration.distribution import distribute_resources
         nccl_env, ib_ip_map, mgmt_ip_map = distribute_resources(
@@ -215,6 +233,7 @@ def run(
             config, dry_run,
             model_revision=recipe.model_revision,
             recipe_name=recipe.name,
+            transfer_mode=effective_transfer_mode,
         )
         # Re-save job metadata with IP maps from IB detection
         if not dry_run and (ib_ip_map or mgmt_ip_map):
@@ -227,17 +246,37 @@ def run(
                 logger.debug("Failed to update job metadata: %s", cluster_id, exc_info=True)
 
     # Sync registry tuning configs (after distribution, before launch)
-    if not no_sync_tuning and not dry_run:
-        from sparkrun.tuning.sync import sync_registry_tuning
-        try:
-            synced = sync_registry_tuning(
-                _registry_mgr, recipe.runtime, dry_run=dry_run,
-                registry_name=recipe.source_registry,
-            )
-            if synced:
-                click.echo("Synced %d tuning config(s) from registries." % synced)
-        except Exception:
-            logger.debug("Failed to sync tuning configs", exc_info=True)
+    if not no_sync_tuning:
+        if not dry_run:
+            from sparkrun.tuning.sync import sync_registry_tuning
+            try:
+                synced = sync_registry_tuning(
+                    _registry_mgr, recipe.runtime, dry_run=dry_run,
+                    registry_name=recipe.source_registry,
+                )
+                if synced:
+                    click.echo("Synced %d tuning config(s) from registries." % synced)
+            except Exception:
+                logger.debug("Failed to sync tuning configs", exc_info=True)
+
+        # Distribute tuning configs to remote hosts (after registry sync, before launch)
+        if not runtime.is_delegating_runtime():
+            from sparkrun.tuning.distribute import distribute_tuning_to_hosts
+            from sparkrun.orchestration.primitives import build_ssh_kwargs
+            try:
+                tuning_failed = distribute_tuning_to_hosts(
+                    recipe.runtime, host_list,
+                    dry_run=dry_run,
+                    transfer_mode=effective_transfer_mode,
+                    **build_ssh_kwargs(config),
+                )
+                if tuning_failed:
+                    click.echo(
+                        "Warning: Tuning config distribution failed on: %s"
+                        % ", ".join(tuning_failed), err=True,
+                    )
+            except Exception:
+                logger.debug("Failed to distribute tuning configs", exc_info=True)
 
     # For GGUF models that were pre-synced, resolve the container-internal
     # cache path and inject it as the ``model`` override so the recipe
@@ -271,6 +310,8 @@ def run(
         click.echo("Mode:      solo")
     else:
         click.echo(f"Mode:      cluster ({len(host_list)} nodes)")
+    if effective_transfer_mode not in ("auto", "local"):
+        click.echo(f"Transfer:  {effective_transfer_mode}")
 
     _display_vram_estimate(recipe, cli_overrides=overrides, auto_detect=True, cache_dir=effective_cache_dir)
 
