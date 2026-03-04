@@ -74,10 +74,15 @@ class LlamaBenchyFramework(BenchmarkingPlugin):
         Always uses ``--format json`` for machine-parseable output and
         ``--save-result`` to capture results to a file.
         """
+        # Strip GGUF quant suffix (e.g. "repo/model-GGUF:Q4_K_M" → "repo/model-GGUF")
+        # The colon syntax is a sparkrun convention; the served model uses the repo ID.
+        from sparkrun.models.download import parse_gguf_model_spec
+        model_id, _ = parse_gguf_model_spec(model)
+
         cmd = [
             "uvx", "llama-benchy",
             "--base-url", target_url,
-            "--model", model,
+            "--model", model_id,
             "--format", "json",
         ]
 
