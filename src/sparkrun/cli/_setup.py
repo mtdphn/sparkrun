@@ -826,11 +826,13 @@ def setup_clear_cache(ctx, hosts, hosts_file, cluster_name, user, save_sudo, dry
 # These are the main memory consumers on DGX Spark systems.
 EARLYOOM_PREFER_PATTERNS = [
     "vllm",
+    "VLLM",
     "sglang",
     "llama-server",
     "llama-cli",
     "trtllm",
     "tritonserver",
+    "ray",
     "python3",
     "python",
 ]

@@ -153,7 +153,7 @@ Install and configure [earlyoom](https://github.com/rfjakob/earlyoom) on cluster
 sparkrun configures earlyoom with inference-aware defaults:
 - **Prefer killing** (on OOM): vllm, sglang, llama-server, llama-cli, trtllm, tritonserver, python
 - **Avoid killing** (protect): systemd, sshd, dockerd, containerd, dbus-daemon, NetworkManager
-- **Trigger**: 2% available memory (~2.5 GB on 128 GB DGX Spark), swap ignored
+- **Trigger**: 2% available memory (~2.5 GB on 128 GB DGX Spark), swap below 80% (emphasis is on unified memory)
 
 ```bash
 sparkrun setup earlyoom --cluster mylab
