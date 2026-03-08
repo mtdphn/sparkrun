@@ -2864,6 +2864,7 @@ class TestSetupEarlyoom:
         assert prefer_regex.startswith("^(")
         assert prefer_regex.endswith(")")
         assert "vllm" in prefer_regex
+        assert "VLLM" in prefer_regex
         assert "sglang" in prefer_regex
         assert "llama-server" in prefer_regex
         assert "trtllm" in prefer_regex
