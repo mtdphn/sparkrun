@@ -257,6 +257,20 @@ def _run_benchmark(
                 )
 
     if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
+        # Check for conflict: required nodes > max_nodes is a hard error
+        try:
+            _req = runtime.compute_required_nodes(recipe, overrides)
+        except ValueError:
+            _req = None
+        if _req is not None and _req > recipe.max_nodes:
+            click.echo(
+                "Error: runtime requires %d nodes (from parallelism settings), "
+                "but recipe '%s' specifies max_nodes=%d"
+                % (_req, recipe.name, recipe.max_nodes),
+                err=True,
+            )
+            sys.exit(1)
+
         click.echo(
             "Note: recipe max_nodes=%d, using %d of %d hosts"
             % (recipe.max_nodes, recipe.max_nodes, len(host_list))

@@ -179,6 +179,22 @@ def run(
     # Enforce max_nodes: trim host list if recipe caps node count.
     # Must happen before cluster_id derivation so stop/logs match.
     if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
+        # Check for conflict: if the runtime requires more nodes than
+        # the recipe allows, that's a hard error — the user explicitly
+        # requested parallelism that exceeds the recipe's max_nodes.
+        try:
+            required = runtime.compute_required_nodes(recipe, overrides)
+        except ValueError:
+            required = None
+        if required is not None and required > recipe.max_nodes:
+            click.echo(
+                "Error: runtime requires %d nodes (from parallelism settings), "
+                "but recipe '%s' specifies max_nodes=%d"
+                % (required, recipe.name, recipe.max_nodes),
+                err=True,
+            )
+            sys.exit(1)
+
         click.echo(
             "Note: recipe max_nodes=%d, using %d of %d hosts"
             % (recipe.max_nodes, recipe.max_nodes, len(host_list))
