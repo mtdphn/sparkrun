@@ -79,6 +79,22 @@ Recipes can be local names, file paths, URLs, or [Spark Arena](https://spark-are
 
 See [tune](/cli/tune/) for details.
 
+### Proxy commands
+
+| Command | Description |
+|---|---|
+| `sparkrun proxy start` | Start the LiteLLM-based inference proxy |
+| `sparkrun proxy stop` | Stop the running proxy |
+| `sparkrun proxy status` | Show proxy status and registered models |
+| `sparkrun proxy models` | List models registered with the proxy |
+| `sparkrun proxy load <recipe>` | Load a model via sparkrun run and register with proxy |
+| `sparkrun proxy unload <recipe>` | Stop a model and remove from proxy |
+| `sparkrun proxy alias add <name> <model>` | Add a model alias |
+| `sparkrun proxy alias remove <name>` | Remove a model alias |
+| `sparkrun proxy alias list` | List configured aliases |
+
+See [proxy](/cli/proxy/) for details.
+
 ### Setup commands
 
 | Command | Description |
