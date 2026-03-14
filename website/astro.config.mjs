@@ -55,6 +55,7 @@ export default defineConfig({
                         {label: 'Cluster Commands', slug: 'cli/cluster-commands'},
                         {label: 'Setup Commands', slug: 'cli/setup-commands'},
                         {label: 'tune', slug: 'cli/tune'},
+                        {label: 'proxy', slug: 'cli/proxy'},
                     ],
                 },
                 {

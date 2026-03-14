@@ -23,8 +23,11 @@ sparkrun benchmark qwen3-1.7b-sglang --profile spark-arena-v1
 # Benchmark an already-running inference server (skip launch/stop)
 sparkrun benchmark qwen3-1.7b-vllm --skip-run --hosts 192.168.11.13
 
-# Override benchmark args
-sparkrun benchmark qwen3-1.7b-vllm --solo -o depth=0,4096,16384 -o concurrency=1,2,5
+# Override benchmark args (use -b for benchmark options)
+sparkrun benchmark qwen3-1.7b-vllm --solo -b depth=0,4096,16384 -b concurrency=1,2,5
+
+# Override recipe options (use -o for recipe overrides like gpu_memory_utilization)
+sparkrun benchmark qwen3-1.7b-vllm --solo -o gpu_memory_utilization=0.9
 
 # Dry run — shows what would be done
 sparkrun benchmark qwen3-1.7b-vllm --solo --dry-run
@@ -52,13 +55,18 @@ Each step can be controlled independently:
 | `--cluster`                  | Use a saved cluster by name                              |
 | `--solo`                     | Force single-node mode                                   |
 | `--tp` / `--tensor-parallel` | Override tensor parallelism                              |
+| `--pp` / `--pipeline-parallel` | Override pipeline parallelism                          |
+| `--gpu-mem`                  | Override GPU memory utilization (0.0–1.0)                |
+| `--max-model-len`            | Override maximum model context length                    |
 | `--port`                     | Override serve port                                      |
 | `--image`                    | Override container image                                 |
+| `-o` / `--option`            | Override recipe options: `-o key=value` (repeatable)     |
 | `--cache-dir`                | HuggingFace cache directory (default: `HF_HOME`, typically `~/.cache/huggingface`) |
 | `--profile`                  | Benchmark profile name or file (`@registry/name` syntax) |
 | `--framework`                | Override benchmarking framework (default: `llama-benchy`) |
 | `--out` / `--output`         | Output file for results YAML                             |
-| `--option` / `-o`            | Override benchmark args: `-o key=value` (repeatable)     |
+| `-b` / `--benchmark-option`  | Override benchmark args: `-b key=value` (repeatable)     |
+| `--exit-on-first-fail` / `--no-exit-on-first-fail` | Abort on first benchmark failure (default: enabled) |
 | `--no-stop`                  | Don't stop inference after benchmarking                  |
 | `--skip-run`                 | Skip launching inference (benchmark existing instance)   |
 | `--sync-tuning`              | Sync tuning configs from registries before benchmarking  |
@@ -69,10 +77,14 @@ Each step can be controlled independently:
 
 Benchmark arguments are resolved from multiple sources (highest priority first):
 
-1. **CLI overrides** (`-o key=value`)
+1. **CLI overrides** (`-b key=value`)
 2. **Benchmark profile** (`--profile`)
 3. **Recipe's `benchmark:` block** (embedded in recipe YAML)
 4. **Framework defaults** (e.g. llama-benchy defaults)
+
+:::note[`-b` vs `-o`]
+Use `-b` / `--benchmark-option` for benchmark framework args (like `depth`, `concurrency`, `tg`). Use `-o` / `--option` for recipe overrides (like `gpu_memory_utilization`, `max_model_len`). They target different layers of configuration.
+:::
 
 ### Benchmark profiles
 
@@ -140,7 +152,7 @@ sparkrun_benchmark:
       - {pp: 2048, tg: 32, depth: 0, ...}
 ```
 
-The output filename is auto-generated as `benchmark_<recipe>_<profile>.yaml` unless `--out` is specified.
+The output filename is auto-generated as `benchmark_<recipe>_<profile>_tp<N>.yaml` (with `_pp<N>` suffix when pipeline parallelism > 1) unless `--out` is specified.
 
 ## llama-benchy framework
 
@@ -160,11 +172,11 @@ Common benchmark args:
 ```bash
 # Example: comprehensive benchmark
 sparkrun benchmark my-recipe --solo \
-  -o pp=2048 \
-  -o tg=32,128 \
-  -o depth=0,4096,16384,65536 \
-  -o concurrency=1,2,5,10 \
-  -o prefix_caching=true
+  -b pp=2048 \
+  -b tg=32,128 \
+  -b depth=0,4096,16384,65536 \
+  -b concurrency=1,2,5,10 \
+  -b prefix_caching=true
 ```
 
 :::note
