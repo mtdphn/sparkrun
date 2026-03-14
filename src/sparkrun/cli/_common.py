@@ -242,6 +242,92 @@ def _apply_tp_trimming(
     )
 
 
+def _validate_and_trim_hosts(
+        host_list: list[str],
+        recipe,
+        overrides: dict,
+        runtime,
+        solo: bool,
+) -> tuple[list[str], bool]:
+    """Validate node count constraints and trim host list.
+
+    Consolidates the node-count validation, max_nodes enforcement,
+    and solo-mode resolution that is shared across ``run``,
+    ``benchmark``, and ``proxy load``.
+
+    Args:
+        host_list: Resolved hosts.
+        recipe: Loaded recipe.
+        overrides: Merged CLI overrides dict.
+        runtime: Resolved runtime plugin instance.
+        solo: Whether ``--solo`` was explicitly requested.
+
+    Returns:
+        Tuple of ``(trimmed_host_list, is_solo)``.
+
+    Raises:
+        SystemExit: On fatal validation errors (not enough hosts,
+            parallelism exceeds max_nodes).
+    """
+    # -- Runtime node-count validation / trimming --
+    if len(host_list) > 1 and not solo:
+        try:
+            required = runtime.compute_required_nodes(recipe, overrides)
+        except ValueError as e:
+            click.echo("Error: %s" % e, err=True)
+            sys.exit(1)
+        if required is not None:
+            if required > len(host_list):
+                click.echo(
+                    "Error: runtime requires %d nodes, but only %d hosts provided"
+                    % (required, len(host_list)),
+                    err=True,
+                )
+                sys.exit(1)
+            elif required < len(host_list):
+                original_count = len(host_list)
+                host_list = _apply_node_trimming(
+                    host_list, recipe, overrides, runtime=runtime,
+                )
+                click.echo(
+                    "Note: %d nodes required, using %d of %d hosts"
+                    % (required, required, original_count)
+                )
+
+    # -- max_nodes enforcement --
+    if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
+        try:
+            required = runtime.compute_required_nodes(recipe, overrides)
+        except ValueError:
+            required = None
+        if required is not None and required > recipe.max_nodes:
+            click.echo(
+                "Error: runtime requires %d nodes (from parallelism settings), "
+                "but recipe '%s' specifies max_nodes=%d"
+                % (required, recipe.name, recipe.max_nodes),
+                err=True,
+            )
+            sys.exit(1)
+
+        click.echo(
+            "Note: recipe max_nodes=%d, using %d of %d hosts"
+            % (recipe.max_nodes, recipe.max_nodes, len(host_list))
+        )
+        host_list = host_list[:recipe.max_nodes]
+
+    # -- Solo mode resolution --
+    is_solo = solo or len(host_list) <= 1
+    if recipe.mode == "cluster" and is_solo and not solo:
+        click.echo("Warning: Recipe requires cluster mode but only one host specified", err=True)
+    if recipe.mode == "solo":
+        is_solo = True
+    if is_solo and len(host_list) > 1:
+        click.echo("Note: solo mode enabled, using 1 of %d hosts" % len(host_list))
+        host_list = host_list[:1]
+
+    return host_list, is_solo
+
+
 def _resolve_cluster_user(
         cluster_name: str | None,
         hosts: str | None,

@@ -8,12 +8,12 @@ import click
 
 from ._common import (
     RECIPE_NAME,
-    _apply_node_trimming,
     _apply_recipe_overrides,
     _load_recipe,
     _resolve_cluster_cache_dir,
     _resolve_hosts_or_exit,
     _resolve_transfer_mode,
+    _validate_and_trim_hosts,
     dry_run_option,
     host_options,
     recipe_override_options,
@@ -236,66 +236,6 @@ def status():
             click.echo("No models registered (or management API unavailable).")
 
 
-# NOTE: not deleting yet, but proxy discover as a CLI command serves no purpose...
-# # ---------------------------------------------------------------------------
-# # proxy discover
-# # ---------------------------------------------------------------------------
-#
-# @proxy.command()
-# @host_options
-# @click.option("--no-health-check", is_flag=True, help="Skip health checks")
-# def discover(hosts, hosts_file, cluster_name, no_health_check):
-#     """One-shot endpoint discovery (debug/inspection).
-#
-#     Queries running containers on cluster hosts and health-checks each
-#     endpoint.  Does not start the proxy.
-#
-#     Examples:
-#
-#       sparkrun proxy discover
-#
-#       sparkrun proxy discover --cluster mylab
-#
-#       sparkrun proxy discover --no-health-check
-#     """
-#     from sparkrun.proxy.discovery import discover_endpoints
-#
-#     host_filter = _resolve_host_filter(cluster_name, hosts, hosts_file)
-#
-#     # Resolve hosts and SSH config for live discovery
-#     live_hosts, ssh_kwargs = _resolve_live_discovery_args(
-#         cluster_name, hosts, hosts_file, host_filter,
-#     )
-#
-#     endpoints = discover_endpoints(
-#         host_filter=host_filter,
-#         check_health=not no_health_check,
-#         host_list=live_hosts,
-#         ssh_kwargs=ssh_kwargs,
-#     )
-#
-#     if not endpoints:
-#         click.echo("No inference endpoints found in job metadata.")
-#         return
-#
-#     click.echo("Discovered %d endpoint(s):" % len(endpoints))
-#     click.echo("")
-#     for ep in endpoints:
-#         health = "healthy" if ep.healthy else "unreachable"
-#         if no_health_check:
-#             health = "unchecked"
-#         models_str = ", ".join(ep.actual_models) if ep.actual_models else ep.model
-#         click.echo("  %-20s %s:%d" % (ep.cluster_id, ep.host, ep.port))
-#         click.echo("    Recipe:   %s" % ep.recipe_name)
-#         click.echo("    Model:    %s" % models_str)
-#         click.echo("    Runtime:  %s" % ep.runtime)
-#         click.echo("    TP:       %d" % ep.tensor_parallel)
-#         click.echo("    Status:   %s" % health)
-#         if ep.served_model_name:
-#             click.echo("    Served:   %s" % ep.served_model_name)
-#         click.echo("")
-#
-
 # ---------------------------------------------------------------------------
 # proxy models
 # ---------------------------------------------------------------------------
@@ -492,34 +432,10 @@ def load_cmd(recipe_name, hosts, hosts_file, cluster_name,
     # Resolve hosts
     host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v)
 
-    # Node count validation / trimming
-    if len(host_list) > 1 and not solo:
-        try:
-            required = runtime.compute_required_nodes(recipe, overrides)
-        except ValueError as e:
-            click.echo("Error: %s" % e, err=True)
-            sys.exit(1)
-        if required is not None:
-            if required > len(host_list):
-                click.echo(
-                    "Error: runtime requires %d nodes, but only %d hosts provided"
-                    % (required, len(host_list)),
-                    err=True,
-                )
-                sys.exit(1)
-            elif required < len(host_list):
-                host_list = _apply_node_trimming(
-                    host_list, recipe, overrides, runtime=runtime,
-                )
-
-    if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
-        host_list = host_list[:recipe.max_nodes]
-
-    is_solo = solo or len(host_list) <= 1
-    if recipe.mode == "solo":
-        is_solo = True
-    if is_solo and len(host_list) > 1:
-        host_list = host_list[:1]
+    # Node count validation, max_nodes enforcement, solo resolution
+    host_list, is_solo = _validate_and_trim_hosts(
+        host_list, recipe, overrides, runtime, solo,
+    )
 
     # Resolve cache dir and transfer mode
     cluster_cache_dir = _resolve_cluster_cache_dir(cluster_name, hosts, hosts_file, cluster_mgr)
@@ -556,15 +472,23 @@ def load_cmd(recipe_name, hosts, hosts_file, cluster_name,
         from sparkrun.proxy.engine import ProxyEngine
         engine = ProxyEngine()
         if engine.is_running():
-            click.echo("Registering with proxy...")
-            from sparkrun.proxy.discovery import discover_endpoints
-            import time
-            time.sleep(2)  # Brief delay for server startup
-            endpoints = discover_endpoints()
-            healthy = [ep for ep in endpoints if ep.healthy]
-            added, removed = engine.sync_models(healthy)
-            if added:
-                click.echo("Registered %d model(s) with proxy." % added)
+            # Wait for the inference server to become healthy before discovery
+            from sparkrun.orchestration.primitives import wait_for_healthy
+            head_host = host_list[0] if host_list else "localhost"
+            health_url = "http://%s:%d/v1/models" % (head_host, result.serve_port)
+            click.echo("Waiting for model server to become ready...")
+            healthy = wait_for_healthy(health_url, max_retries=120, retry_interval=5)
+            if not healthy:
+                click.echo("Warning: model server not healthy at %s — skipping proxy registration."
+                           % health_url, err=True)
+            else:
+                click.echo("Registering with proxy...")
+                from sparkrun.proxy.discovery import discover_endpoints
+                endpoints = discover_endpoints()
+                healthy_eps = [ep for ep in endpoints if ep.healthy]
+                added, removed = engine.sync_models(healthy_eps)
+                if added:
+                    click.echo("Registered %d model(s) with proxy." % added)
 
 
 @proxy.command("unload")

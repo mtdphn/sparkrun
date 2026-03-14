@@ -60,11 +60,7 @@ def launch_inference(
         skip_keys: set[str] | frozenset[str] = frozenset(),
         dry_run: bool = False,
         detached: bool = True,
-        # Runtime-specific kwargs forwarded to runtime.run()
-        ray_port: int | None = None,
-        dashboard_port: int | None = None,
-        dashboard: bool = False,
-        init_port: int | None = None,
+        runtime_kwargs: dict[str, Any] | None = None,
 ) -> LaunchResult:
     """Launch an inference workload.
 
@@ -98,10 +94,8 @@ def launch_inference(
         skip_keys: Keys to suppress in serve command generation.
         dry_run: Show what would be done without executing.
         detached: Run containers in detached mode.
-        ray_port: Ray GCS port (forwarded to runtime.run).
-        dashboard_port: Ray dashboard port (forwarded to runtime.run).
-        dashboard: Enable Ray dashboard (forwarded to runtime.run).
-        init_port: Distributed init port (forwarded to runtime.run).
+        runtime_kwargs: Runtime-specific options forwarded to runtime.run()
+            (e.g. ray_port, dashboard_port, dashboard, init_port).
 
     Returns:
         LaunchResult with the outcome and all resolved context.
@@ -257,18 +251,6 @@ def launch_inference(
 
         try_clear_page_cache(host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
 
-    # Build runtime.run() kwargs — include runtime-specific options only
-    # when they were explicitly provided.
-    run_kwargs: dict[str, Any] = {}
-    if ray_port is not None:
-        run_kwargs["ray_port"] = ray_port
-    if dashboard_port is not None:
-        run_kwargs["dashboard_port"] = dashboard_port
-    if dashboard:
-        run_kwargs["dashboard"] = dashboard
-    if init_port is not None:
-        run_kwargs["init_port"] = init_port
-
     # Launch
     rc = runtime.run(
         hosts=host_list,
@@ -285,7 +267,7 @@ def launch_inference(
         nccl_env=nccl_env,
         ib_ip_map=ib_ip_map,
         skip_keys=skip_keys,
-        **run_kwargs,
+        **(runtime_kwargs or {}),
     )
 
     return LaunchResult(

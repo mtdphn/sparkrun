@@ -4,13 +4,59 @@ Provides CLI commands, metrics collection, and web server for monitoring
 DGX Spark clusters. Reuses sparkrun's ClusterMonitor infrastructure.
 """
 
+import collections
+import logging
 import click
-import flask
 import threading
 import time
 from typing import Optional
 
+try:
+    import flask
+except ImportError:
+    flask = None  # type: ignore[assignment]
+
 from sparkrun.core.monitoring import ClusterMonitor, parse_monitor_line, HostMonitorState
+
+logger = logging.getLogger(__name__)
+
+
+# Re-use the shared host_options decorator from the main CLI.
+# Import lazily in functions that need it for config/host resolution.
+def _host_options(f):
+    """Host-targeting options matching the main CLI: --hosts, --hosts-file, --cluster."""
+    f = click.option("--cluster", "cluster_name", default=None,
+                     help="Use a saved cluster by name")(f)
+    f = click.option("--hosts-file", default=None,
+                     help="File with hosts (one per line, # comments)")(f)
+    f = click.option("--hosts", "-H", default=None,
+                     help="Comma-separated host list")(f)
+    return f
+
+
+def _resolve_sparkmon_hosts(ctx, hosts, hosts_file, cluster_name):
+    """Resolve hosts and SSH kwargs for sparkmon commands.
+
+    Returns:
+        Tuple of ``(host_list, ssh_kwargs)``.
+    """
+    from sparkrun.cli._common import _resolve_hosts_or_exit
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    config = SparkrunConfig()
+
+    try:
+        host_list, _ = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
+    except SystemExit:
+        raise
+
+    if not host_list:
+        click.echo("Error: No hosts specified. Use --hosts or --cluster.", err=True)
+        ctx.exit(1)
+
+    ssh_kwargs = build_ssh_kwargs(config)
+    return host_list, ssh_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -27,9 +73,11 @@ class SparkmonCollector(ClusterMonitor):
     def __init__(self, hosts: list[str], ssh_kwargs: dict, interval: int = 2, max_samples: int = 60):
         super().__init__(hosts, ssh_kwargs, interval)
         self.max_samples = max_samples
-        self.metrics: dict[str, list[dict]] = {host: [] for host in hosts}
+        self.metrics: dict[str, collections.deque] = {
+            host: collections.deque(maxlen=max_samples) for host in hosts
+        }
         self._started = False
-    
+
     def _reader(self, host: str, proc) -> None:
         """Override to store parsed metrics in memory."""
         try:
@@ -54,12 +102,8 @@ class SparkmonCollector(ClusterMonitor):
                         'gpu_power_limit_w': sample.gpu_power_limit_w,
                     }
                     self.metrics[host].append(metric)
-                    # Trim old samples to prevent memory growth
-                    if len(self.metrics[host]) > self.max_samples:
-                        self.metrics[host] = self.metrics[host][-self.max_samples:]
-        except Exception as e:
-            # Handle stream errors gracefully
-            pass
+        except Exception:
+            logger.debug("Reader error for host %s", host, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -67,57 +111,66 @@ class SparkmonCollector(ClusterMonitor):
 # ---------------------------------------------------------------------------
 
 _web_app: Optional[flask.Flask] = None
-_collector_ref: Optional[SparkmonCollector] = None
 
 
-def create_web_app():
+def _require_flask():
+    """Raise a clear error if Flask is not installed."""
+    if flask is None:
+        raise click.ClickException(
+            "Flask is required for sparkmon web features. "
+            "Install with: pip install sparkrun[monitoring]"
+        )
+
+
+def create_web_app(collector=None):
     """Create and configure the Flask web application."""
+    _require_flask()
     global _web_app
-    
+
     app = flask.Flask(__name__, static_folder='web', static_url_path='')
-    
+    app.config["collector"] = collector
+
     @app.route('/')
     def index():
         """Serve the main dashboard."""
         return app.send_static_file('index.html')
-    
+
     @app.route('/api/metrics')
     def get_metrics():
         """Get current metrics from all hosts."""
-        global _collector_ref
-        if not _collector_ref:
+        coll = flask.current_app.config.get("collector")
+        if not coll:
             return flask.jsonify({'error': 'monitoring not started'}), 400
-        return flask.jsonify(_collector_ref.metrics)
-    
+        return flask.jsonify({host: list(samples) for host, samples in coll.metrics.items()})
+
     @app.route('/api/status')
     def get_status():
         """Get monitoring status."""
-        global _collector_ref
-        if not _collector_ref:
+        coll = flask.current_app.config.get("collector")
+        if not coll:
             return flask.jsonify({'running': False})
         return flask.jsonify({
             'running': True,
-            'hosts': list(_collector_ref.metrics.keys()),
-            'interval': _collector_ref.interval,
-            'total_hosts': len(_collector_ref.hosts),
+            'hosts': list(coll.metrics.keys()),
+            'interval': coll.interval,
+            'total_hosts': len(coll.hosts),
         })
-    
+
     @app.route('/api/health')
     def health():
         """Health check endpoint."""
         return flask.jsonify({'status': 'ok'})
-    
+
     _web_app = app
     return app
 
 
-def run_web_server(port: int = 8080):
+def run_web_server(port: int = 8080, bind: str = "127.0.0.1", collector=None):
     """Run the Flask web server."""
     global _web_app
     if not _web_app:
-        _web_app = create_web_app()
-    # Run with threaded=True to handle concurrent requests
-    _web_app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+        _web_app = create_web_app(collector=collector)
+    _web_app.run(host=bind, port=port, debug=False, threaded=True)
 
 
 # ---------------------------------------------------------------------------
@@ -155,84 +208,56 @@ def sparkmon():
 @click.option("--web", is_flag=True, help="Start web UI server")
 @click.option("--interval", "-i", default=2, help="Sampling interval in seconds")
 @click.option("--port", "-p", default=8080, help="Web UI port (default: 8080)")
-@click.option("--cluster", "-c", default=None, help="Use named cluster definition")
-@click.option("--hosts", "-H", default=None, help="Comma-separated list of hosts")
-@click.option("--ssh-user", default=None, help="SSH username")
-@click.option("--ssh-key", default=None, help="Path to SSH private key")
+@click.option("--bind", default="127.0.0.1", help="Web UI bind address (default: 127.0.0.1)")
+@_host_options
 @click.pass_context
-def start(ctx, web: bool, interval: int, port: int, cluster: Optional[str],
-          hosts: Optional[str], ssh_user: Optional[str], ssh_key: Optional[str]):
+def start(ctx, web: bool, interval: int, port: int, bind: str,
+          hosts: Optional[str], hosts_file: Optional[str], cluster_name: Optional[str]):
     """Start cluster monitoring.
-    
+
     Launches parallel SSH streams to collect system metrics from all
     specified hosts. If --web is provided, starts a web dashboard at
     http://localhost:<port>.
     """
-    from sparkrun.cli._common import _resolve_hosts_or_exit
-    from sparkrun.core.config import SparkrunConfig
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
-    
-    # Load config
-    config = SparkrunConfig()
-    
-    # Resolve hosts
-    try:
-        host_list, _ = _resolve_hosts_or_exit(hosts, None, cluster, config)
-    except SystemExit:
-        raise
-    
-    if not host_list:
-        click.echo("Error: No hosts specified. Use --hosts or --cluster.", err=True)
-        ctx.exit(1)
-    
-    # Build SSH kwargs from config
-    ssh_kwargs = build_ssh_kwargs(config)
-    
-    # Override with CLI options if provided
-    if ssh_user:
-        ssh_kwargs['ssh_user'] = ssh_user
-    if ssh_key:
-        ssh_kwargs['ssh_key'] = ssh_key
-    
+    host_list, ssh_kwargs = _resolve_sparkmon_hosts(ctx, hosts, hosts_file, cluster_name)
+
     click.echo(f"Starting monitoring on {len(host_list)} host(s): {', '.join(host_list)}")
     click.echo(f"Sampling interval: {interval}s")
-    
+
     # Start collector
-    global _collector_ref
-    _collector_ref = SparkmonCollector(host_list, ssh_kwargs, interval)
-    _collector_ref.start()
-    
+    collector = SparkmonCollector(host_list, ssh_kwargs, interval)
+    collector.start()
+
     click.echo("Collector started...")
-    
+
     if web:
         # Start web server in background thread
         def start_server():
-            click.echo(f"Starting web UI at http://localhost:{port}")
-            run_web_server(port)
-        
+            click.echo(f"Starting web UI at http://{bind}:{port}")
+            run_web_server(port, bind=bind, collector=collector)
+
         server_thread = threading.Thread(target=start_server, daemon=True)
         server_thread.start()
-        
+
         # Give server time to start
         time.sleep(1)
-        click.echo("Web UI available at http://localhost:{}".format(port))
+        click.echo("Web UI available at http://{}:{}".format(bind, port))
         click.echo("Press Ctrl-C to stop monitoring")
-    
+
     # Block until Ctrl-C
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\nShutting down...")
-        if _collector_ref:
-            _collector_ref.stop()
+        collector.stop()
         click.echo("Monitoring stopped.")
 
 
-@sparkmon.command("stop")
+@sparkmon.command("stop", hidden=True)
 def stop():
     """Stop monitoring.
-    
+
     Note: This is a placeholder. In the MVP, monitoring is stopped
     by pressing Ctrl-C in the start process.
     """
@@ -241,43 +266,16 @@ def stop():
 
 
 @sparkmon.command("status")
-@click.option("--cluster", "-c", default=None, help="Use named cluster definition")
-@click.option("--hosts", "-H", default=None, help="Comma-separated list of hosts")
-@click.option("--ssh-user", default=None, help="SSH username")
-@click.option("--ssh-key", default=None, help="Path to SSH private key")
+@_host_options
 @click.pass_context
-def status(ctx, cluster: Optional[str], hosts: Optional[str],
-           ssh_user: Optional[str], ssh_key: Optional[str]):
+def status(ctx, hosts: Optional[str], hosts_file: Optional[str],
+           cluster_name: Optional[str]):
     """Show monitoring status and latest metrics.
-    
+
     Fetches the latest metrics from all hosts and displays a summary.
     """
-    from sparkrun.cli._common import _resolve_hosts_or_exit
-    from sparkrun.core.config import SparkrunConfig
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
-    
-    # Load config
-    config = SparkrunConfig()
-    
-    # Resolve hosts
-    try:
-        host_list, _ = _resolve_hosts_or_exit(hosts, None, cluster, config)
-    except SystemExit:
-        return
-    
-    if not host_list:
-        click.echo("Error: No hosts specified. Use --hosts or --cluster.", err=True)
-        ctx.exit(1)
-    
-    # Build SSH kwargs from config
-    ssh_kwargs = build_ssh_kwargs(config)
-    
-    # Override with CLI options if provided
-    if ssh_user:
-        ssh_kwargs['ssh_user'] = ssh_user
-    if ssh_key:
-        ssh_kwargs['ssh_key'] = ssh_key
-    
+    host_list, ssh_kwargs = _resolve_sparkmon_hosts(ctx, hosts, hosts_file, cluster_name)
+
     # Quick one-shot collection
     click.echo(f"Collecting metrics from {len(host_list)} host(s)...")
     
@@ -311,45 +309,20 @@ def status(ctx, cluster: Optional[str], hosts: Optional[str],
 
 
 @sparkmon.command("export")
-@click.option("--cluster", "-c", default=None, help="Use named cluster definition")
-@click.option("--hosts", "-H", default=None, help="Comma-separated list of hosts")
+@_host_options
 @click.option("--duration", "-d", default=60, help="Duration in seconds to collect")
 @click.option("--output", "-o", default=None, help="Output file path (default: stdout)")
-@click.option("--ssh-user", default=None, help="SSH username")
-@click.option("--ssh-key", default=None, help="Path to SSH private key")
 @click.pass_context
-def export(ctx, cluster: Optional[str], hosts: Optional[str], duration: int,
-           output: Optional[str], ssh_user: Optional[str], ssh_key: Optional[str]):
+def export(ctx, hosts: Optional[str], hosts_file: Optional[str],
+           cluster_name: Optional[str], duration: int, output: Optional[str]):
     """Export metrics to a file.
-    
+
     Collects metrics for the specified duration and outputs as JSON.
     """
     import json
-    from sparkrun.cli._common import _resolve_hosts_or_exit
-    
-    # Resolve hosts
-    # Load config
-    config = SparkrunConfig()
-    
-    # Resolve hosts
-    try:
-        host_list, _ = _resolve_hosts_or_exit(hosts, None, cluster, config)
-    except SystemExit:
-        return
-    
-    if not host_list:
-        click.echo("Error: No hosts specified. Use --hosts or --cluster.", err=True)
-        ctx.exit(1)
-    
-    # Build SSH kwargs from config
-    ssh_kwargs = build_ssh_kwargs(config)
-    
-    # Override with CLI options if provided
-    if ssh_user:
-        ssh_kwargs['ssh_user'] = ssh_user
-    if ssh_key:
-        ssh_kwargs['ssh_key'] = ssh_key
-    
+
+    host_list, ssh_kwargs = _resolve_sparkmon_hosts(ctx, hosts, hosts_file, cluster_name)
+
     click.echo(f"Collecting metrics for {duration} seconds from {len(host_list)} host(s)...")
     
     collector = SparkmonCollector(host_list, ssh_kwargs, interval=2, max_samples=duration//2 + 10)
@@ -360,11 +333,11 @@ def export(ctx, cluster: Optional[str], hosts: Optional[str], duration: int,
     
     # Prepare export data
     export_data = {
-        'cluster': cluster or 'manual',
+        'cluster': cluster_name or 'manual',
         'hosts': host_list,
         'duration_sec': duration,
         'interval_sec': 2,
-        'samples': collector.metrics,
+        'samples': {host: list(samples) for host, samples in collector.metrics.items()},
     }
     
     # Output
@@ -415,64 +388,56 @@ def generate_mock_metrics(host: str) -> dict:
 @sparkmon.command("demo")
 @click.option("--hosts", "-H", default="node1,node2,node3", help="Comma-separated mock host names")
 @click.option("--port", "-p", default=8080, help="Web UI port")
-def demo(hosts: str, port: int):
+@click.option("--bind", default="127.0.0.1", help="Web UI bind address (default: 127.0.0.1)")
+def demo(hosts: str, port: int, bind: str):
     """Start demo mode with mock data (no real DGX Spark nodes needed)."""
     host_list = [h.strip() for h in hosts.split(",") if h.strip()]
-    
+
     click.echo(f"Starting DEMO mode on {len(host_list)} mock host(s): {', '.join(host_list)}")
-    
-    global _collector_ref
-    
+
     # Create a simple mock collector
     class MockCollector:
         def __init__(self, hosts):
             self.hosts = hosts
-            self.metrics = {host: [] for host in hosts}
+            self.metrics = {host: collections.deque(maxlen=60) for host in hosts}
             self.interval = 2
             self._started = False
-        
+
         def start(self):
             self._started = True
             click.echo("Mock collector started...")
-        
+
         def stop(self):
             self._started = False
             click.echo("Mock collector stopped.")
-    
-    _collector_ref = MockCollector(host_list)
-    
+
+    collector = MockCollector(host_list)
+
     # Start web server
     def start_server():
-        import threading
-        import time
-        
         # Add mock data in background
         def add_mock_data():
-            while _collector_ref._started:
+            while collector._started:
                 for host in host_list:
                     mock = generate_mock_metrics(host)
-                    _collector_ref.metrics[host].append(mock)
-                    # Keep last 60 samples
-                    if len(_collector_ref.metrics[host]) > 60:
-                        _collector_ref.metrics[host] = _collector_ref.metrics[host][-60:]
+                    collector.metrics[host].append(mock)
                 time.sleep(2)
-        
+
         mock_thread = threading.Thread(target=add_mock_data, daemon=True)
         mock_thread.start()
-        
-        click.echo(f"Demo web UI available at http://localhost:{port}")
-        run_web_server(port)
-    
+
+        click.echo(f"Demo web UI available at http://{bind}:{port}")
+        run_web_server(port, bind=bind, collector=collector)
+
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
-    
+
     time.sleep(1)
     click.echo("Press Ctrl-C to stop demo mode")
-    
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\nShutting down demo...")
-        if _collector_ref:
-            _collector_ref.stop()
+        collector.stop()

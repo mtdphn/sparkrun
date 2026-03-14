@@ -12,7 +12,6 @@ import click
 from ._common import (
     PROFILE_NAME,
     RECIPE_NAME,
-    _apply_node_trimming,
     _apply_recipe_overrides,
     _display_vram_estimate,
     _expand_recipe_shortcut,
@@ -22,6 +21,7 @@ from ._common import (
     _resolve_hosts_or_exit,
     _setup_logging,
     _simplify_recipe_ref,
+    _validate_and_trim_hosts,
     dry_run_option,
     host_options,
     recipe_override_options,
@@ -218,57 +218,10 @@ def _run_benchmark(
 
     host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v)
 
-    # Node count validation / trimming
-    if len(host_list) > 1 and not solo:
-        try:
-            required = runtime.compute_required_nodes(recipe, overrides)
-        except ValueError as e:
-            click.echo("Error: %s" % e, err=True)
-            sys.exit(1)
-        if required is not None:
-            if required > len(host_list):
-                click.echo(
-                    "Error: runtime requires %d nodes, but only %d hosts provided"
-                    % (required, len(host_list)),
-                    err=True,
-                )
-                sys.exit(1)
-            elif required < len(host_list):
-                original_count = len(host_list)
-                host_list = _apply_node_trimming(
-                    host_list, recipe, overrides, runtime=runtime,
-                )
-                click.echo(
-                    "Note: %d nodes required, using %d of %d hosts"
-                    % (required, required, original_count)
-                )
-
-    if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
-        try:
-            _req = runtime.compute_required_nodes(recipe, overrides)
-        except ValueError:
-            _req = None
-        if _req is not None and _req > recipe.max_nodes:
-            click.echo(
-                "Error: runtime requires %d nodes (from parallelism settings), "
-                "but recipe '%s' specifies max_nodes=%d"
-                % (_req, recipe.name, recipe.max_nodes),
-                err=True,
-            )
-            sys.exit(1)
-
-        click.echo(
-            "Note: recipe max_nodes=%d, using %d of %d hosts"
-            % (recipe.max_nodes, recipe.max_nodes, len(host_list))
-        )
-        host_list = host_list[:recipe.max_nodes]
-
-    is_solo = solo or len(host_list) <= 1
-    if recipe.mode == "solo":
-        is_solo = True
-    if is_solo and len(host_list) > 1:
-        click.echo("Note: solo mode enabled, using 1 of %d hosts" % len(host_list))
-        host_list = host_list[:1]
+    # Node count validation, max_nodes enforcement, solo resolution
+    host_list, is_solo = _validate_and_trim_hosts(
+        host_list, recipe, overrides, runtime, solo,
+    )
 
     # Resolve cache dir
     cluster_cache_dir = _resolve_cluster_cache_dir(cluster_name, hosts, hosts_file, cluster_mgr)

@@ -215,14 +215,14 @@ class ProxyEngine:
                 start_new_session=True,
                 env=env,
             )
+            # Close our copy of the fd — the subprocess inherited it
+            log_file.close()
 
             # Wait briefly and verify the process survived startup
             import time
             time.sleep(2)
             poll = proc.poll()
             if poll is not None:
-                log_file.close()
-                # Process already exited — show error
                 try:
                     tail = log_path.read_text()[-2000:]
                 except OSError:
@@ -296,9 +296,10 @@ class ProxyEngine:
             )
             return proc.pid
         except Exception:
-            log_file.close()
             logger.warning("Failed to start auto-discover process", exc_info=True)
             return None
+        finally:
+            log_file.close()
 
     def stop_autodiscover(self) -> None:
         """Stop the background auto-discovery process if running."""

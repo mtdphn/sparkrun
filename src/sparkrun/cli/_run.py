@@ -19,6 +19,7 @@ from ._common import (
     _resolve_transfer_mode,
     _setup_logging,
     _simplify_recipe_ref,
+    _validate_and_trim_hosts,
     dry_run_option,
     host_options,
     recipe_override_options,
@@ -71,7 +72,6 @@ def run(
 
       sparkrun run my-recipe.yaml -o attention_backend=triton -o max_model_len=4096
     """
-    from sparkrun.cli._common import _apply_node_trimming
     from sparkrun.core.bootstrap import init_sparkrun, get_runtime
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core.launcher import launch_inference
@@ -135,61 +135,10 @@ def run(
         else:
             host_source = "localhost"
 
-    # Node count validation / trimming
-    if len(host_list) > 1 and not solo:
-        try:
-            required = runtime.compute_required_nodes(recipe, overrides)
-        except ValueError as e:
-            click.echo("Error: %s" % e, err=True)
-            sys.exit(1)
-        if required is not None:
-            if required > len(host_list):
-                click.echo(
-                    "Error: runtime requires %d nodes, but only %d hosts provided"
-                    % (required, len(host_list)),
-                    err=True,
-                )
-                sys.exit(1)
-            elif required < len(host_list):
-                original_count = len(host_list)
-                host_list = _apply_node_trimming(
-                    host_list, recipe, overrides, runtime=runtime,
-                )
-                click.echo(
-                    "Note: %d nodes required, using %d of %d hosts"
-                    % (required, required, original_count)
-                )
-
-    # Enforce max_nodes
-    if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
-        try:
-            required = runtime.compute_required_nodes(recipe, overrides)
-        except ValueError:
-            required = None
-        if required is not None and required > recipe.max_nodes:
-            click.echo(
-                "Error: runtime requires %d nodes (from parallelism settings), "
-                "but recipe '%s' specifies max_nodes=%d"
-                % (required, recipe.name, recipe.max_nodes),
-                err=True,
-            )
-            sys.exit(1)
-
-        click.echo(
-            "Note: recipe max_nodes=%d, using %d of %d hosts"
-            % (recipe.max_nodes, recipe.max_nodes, len(host_list))
-        )
-        host_list = host_list[:recipe.max_nodes]
-
-    # Determine mode
-    is_solo = solo or len(host_list) <= 1
-    if recipe.mode == "cluster" and is_solo and not solo:
-        click.echo("Warning: Recipe requires cluster mode but only one host specified", err=True)
-    if recipe.mode == "solo":
-        is_solo = True
-    if is_solo and len(host_list) > 1:
-        click.echo("Note: solo mode enabled, using 1 of %d hosts" % len(host_list))
-        host_list = host_list[:1]
+    # Node count validation, max_nodes enforcement, solo resolution
+    host_list, is_solo = _validate_and_trim_hosts(
+        host_list, recipe, overrides, runtime, solo,
+    )
 
     # Resolve cache dir and transfer mode
     cluster_cache_dir = _resolve_cluster_cache_dir(cluster_name, hosts, hosts_file, cluster_mgr)
@@ -223,6 +172,17 @@ def run(
     click.echo()
 
     # Launch via shared pipeline
+    # Build runtime-specific kwargs
+    runtime_kwargs: dict = {}
+    if ray_port is not None:
+        runtime_kwargs["ray_port"] = ray_port
+    if dashboard_port is not None:
+        runtime_kwargs["dashboard_port"] = dashboard_port
+    if dashboard:
+        runtime_kwargs["dashboard"] = dashboard
+    if init_port is not None:
+        runtime_kwargs["init_port"] = init_port
+
     result = launch_inference(
         recipe=recipe,
         runtime=runtime,
@@ -238,10 +198,7 @@ def run(
         sync_tuning=not no_sync_tuning,
         dry_run=dry_run,
         detached=not foreground,
-        ray_port=ray_port,
-        dashboard_port=dashboard_port,
-        dashboard=dashboard,
-        init_port=init_port,
+        runtime_kwargs=runtime_kwargs,
     )
 
     click.echo("Cluster:   %s" % result.cluster_id)
