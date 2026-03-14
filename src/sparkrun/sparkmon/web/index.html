@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sparkmon - dgx spark cluster monitor</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js?v=2"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: linear-gradient(135deg, #000000 0%, #0a0a0a 50%, #111111 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #0f3460;
+        }
+        
+        h1 {
+            color: #76b900;
+            font-size: 2rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-shadow: 0 0 20px rgba(118, 185, 0, 0.3);
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: #76b900;
+            font-weight: 600;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #76b900;
+            box-shadow: 0 0 10px rgba(118, 185, 0, 0.8);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .card {
+            background: linear-gradient(135deg, rgba(15, 15, 15, 0.95) 0%, rgba(20, 20, 20, 0.95) 100%);
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #333333;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px rgba(118, 185, 0, 0.15);
+            border-color: #76b900;
+        }
+        
+        .card h3 {
+            color: #76b900;
+            margin-bottom: 15px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .card canvas {
+            max-height: 250px;
+        }
+        
+        .table-container {
+            background: linear-gradient(135deg, rgba(15, 15, 15, 0.95) 0%, rgba(20, 20, 20, 0.95) 100%);
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #333333;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            overflow-x: auto;
+        }
+        
+        .table-container h3 {
+            color: #76b900;
+            margin-bottom: 15px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #0f3460;
+        }
+        
+        th {
+            color: #76b900;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 1px;
+            border-bottom: 2px solid #76b900;
+        }
+        
+        tr:hover {
+            background: rgba(118, 185, 0, 0.08);
+        }
+        
+        .status-ok {
+            color: #76b900;
+            text-shadow: 0 0 8px rgba(118, 185, 0, 0.6);
+        }
+        
+        .status-error {
+            color: #ff4757;
+        }
+        
+        .status-warning {
+            color: #ffa502;
+        }
+        
+        .metric-value {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-weight: 600;
+        }
+        
+        .metric-high {
+            color: #ff4757;
+        }
+        
+        .metric-medium {
+            color: #ffa502;
+        }
+        
+        .metric-low {
+            color: #76b900;
+            text-shadow: 0 0 5px rgba(118, 185, 0, 0.4);
+        }
+        
+        .summary-bar {
+            display: flex;
+            gap: 30px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .summary-item {
+            background: linear-gradient(135deg, rgba(15, 15, 15, 0.95) 0%, rgba(25, 25, 25, 0.95) 100%);
+            padding: 15px 25px;
+            border-radius: 6px;
+            border: 1px solid #333333;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+        
+        .summary-label {
+            font-size: 0.75rem;
+            color: #888;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+            letter-spacing: 1px;
+        }
+        
+        .summary-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #76b900;
+            text-shadow: 0 0 10px rgba(118, 185, 0, 0.3);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #888;
+        }
+        
+        .error-banner {
+            background: rgba(255, 71, 87, 0.15);
+            border: 1px solid #ff4757;
+            color: #ff4757;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+            box-shadow: 0 2px 10px rgba(255, 71, 87, 0.2);
+        }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>
+                
+                sparkmon - dgx spark cluster monitor
+            </h1>
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span id="connection-status">Connected</span>
+            </div>
+        </header>
+        
+        <div class="error-banner" id="error-banner"></div>
+        
+        <div class="summary-bar">
+            <div class="summary-item">
+                <div class="summary-label">Hosts</div>
+                <div class="summary-value" id="summary-hosts">-</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Avg GPU</div>
+                <div class="summary-value" id="summary-gpu">-</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Avg Memory</div>
+                <div class="summary-value" id="summary-mem">-</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Active Jobs</div>
+                <div class="summary-value" id="summary-jobs">-</div>
+            </div>
+        </div>
+        
+        <div class="grid">
+            <div class="card">
+                <h3>GPU Utilization</h3>
+                <canvas id="gpuChart"></canvas>
+            </div>
+            <div class="card">
+                <h3>Memory Usage</h3>
+                <canvas id="memChart"></canvas>
+            </div>
+            <div class="card">
+                <h3>CPU Usage</h3>
+                <canvas id="cpuChart"></canvas>
+            </div>
+            <div class="card">
+                <h3>GPU Temperature</h3>
+                <canvas id="tempChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <h3>Node Details</h3>
+            <table id="nodeTable">
+                <thead>
+                    <tr>
+                        <th>Host</th>
+                        <th>GPU Util</th>
+                        
+                        <th>GPU Temp</th>
+                        <th>CPU Usage</th>
+                        <th>Unified Memory</th>
+                        <th>GPU Power</th>
+                        <th>Jobs</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody class="loading">
+                    <tr><td colspan="8" class="loading">Loading metrics...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        // Chart instances
+        let gpuChart, memChart, cpuChart, tempChart;
+        
+        // Initialize charts
+        function initCharts() {
+            const commonOptions = {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: '#eee' }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { color: '#888' },
+                        grid: { color: '#0f3460' }
+                    },
+                    x: {
+                        ticks: { color: '#888' },
+                        grid: { display: false }
+                    }
+                }
+            };
+            
+            const gpuCanvas = document.getElementById('gpuChart');
+            if (!gpuCanvas) { console.error('gpuChart canvas not found!'); return; }
+            console.log('Initializing gpuChart...');
+            gpuChart = new Chart(gpuCanvas, {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: { ...commonOptions.scales.y, max: 100 }
+                    }
+                }
+            });
+            console.log('gpuChart initialized:', gpuChart.data.datasets);
+            
+            memChart = new Chart(document.getElementById('memChart'), {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: { ...commonOptions.scales.y, max: 100 }
+                    }
+                }
+            });
+            
+            cpuChart = new Chart(document.getElementById('cpuChart'), {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: { ...commonOptions.scales.y, max: 100 }
+                    }
+                }
+            });
+            
+            tempChart = new Chart(document.getElementById('tempChart'), {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: { ...commonOptions.scales.y, max: 90 }
+                    }
+                }
+            });
+        }
+        
+        // Generate random color for host
+        function hostColor(index) {
+            const hues = [0, 30, 60, 120, 180, 210, 240, 280];
+            return `hsl(${hues[index % hues.length]}, 70%, 50%)`;
+        }
+        
+        // Format value with color based on thresholds
+        function formatMetric(value, high = 90, medium = 70, suffix = '') {
+            if (value === 'N/A' || value === null || value === undefined) return { text: 'N/A', class: '' };
+            const num = parseFloat(value);
+            if (isNaN(num)) return { text: value + suffix, class: '' };
+            
+            let cls = 'metric-low';
+            if (num >= high) cls = 'metric-high';
+            else if (num >= medium) cls = 'metric-medium';
+            
+            return { text: num.toFixed(1) + suffix, class: cls };
+        }
+        
+        // Update dashboard with new metrics
+        async function updateMetrics() {
+            try {
+                const resp = await fetch(window.location.origin + '/api/metrics');
+                if (!resp.ok) throw new Error('Failed to fetch metrics');
+                const data = await resp.json();
+                
+                const hosts = Object.keys(data);
+                if (hosts.length === 0) return;
+                
+                // Update summary
+                document.getElementById('summary-hosts').textContent = hosts.length;
+                
+                // Calculate averages
+                let totalGpu = 0, totalMem = 0, totalJobs = 0;
+                let countWithGpu = 0, countWithMem = 0;
+                
+                hosts.forEach(host => {
+                    const samples = data[host];
+                    if (samples && samples.length > 0) {
+                        const latest = samples[samples.length - 1];
+                        if (latest.gpu_util_pct) {
+                            totalGpu += parseFloat(latest.gpu_util_pct);
+                            countWithGpu++;
+                        }
+                        if (latest.mem_used_pct) {
+                            totalMem += parseFloat(latest.mem_used_pct);
+                            countWithMem++;
+                        }
+                        if (latest.sparkrun_jobs) {
+                            totalJobs += parseInt(latest.sparkrun_jobs) || 0;
+                        }
+                    }
+                });
+                
+                document.getElementById('summary-gpu').textContent = 
+                    countWithGpu ? (totalGpu / countWithGpu).toFixed(1) + '%' : '-';
+                document.getElementById('summary-mem').textContent = 
+                    countWithMem ? (totalMem / countWithMem).toFixed(1) + '%' : '-';
+                document.getElementById('summary-jobs').textContent = totalJobs;
+                
+                // Initialize charts with hosts if needed
+                if (gpuChart && (!gpuChart.data || !gpuChart.data.datasets || gpuChart.data.datasets.length === 0)) {
+                    hosts.forEach((host, idx) => {
+                        const color = hostColor(idx);
+                        const host_samples = data[host] || [];
+                        const host_latest = host_samples.length > 0 ? host_samples[host_samples.length - 1] : {};
+                        const host_label = host_latest.hostname || host;
+                        gpuChart.data.datasets.push({
+                            label: host_label,
+                            data: [],
+                            borderColor: color,
+                            backgroundColor: color + '20',
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0
+                        });
+                        memChart.data.datasets.push({
+                            label: host_label,
+                            data: [],
+                            borderColor: color,
+                            backgroundColor: color + '20',
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0
+                        });
+                        cpuChart.data.datasets.push({
+                            label: host_label,
+                            data: [],
+                            borderColor: color,
+                            backgroundColor: color + '20',
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0
+                        });
+                        tempChart.data.datasets.push({
+                            label: host_label,
+                            data: [],
+                            borderColor: color,
+                            backgroundColor: color + '20',
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0
+                        });
+                    });
+                }
+                
+                // Update charts
+                const allLabels = [];
+                hosts.forEach(host => {
+                    const samples = data[host] || [];
+                    const labels = samples.map(s => {
+                        const ts = s.timestamp ? s.timestamp.slice(11) : '';
+                        if (ts && !allLabels.includes(ts)) allLabels.push(ts);
+                        return ts;
+                    });
+                    
+                    // Find dataset index for this host (use hostname if available)
+                    const host_samples = data[host] || []
+                    const host_latest = host_samples.length > 0 ? host_samples[host_samples.length - 1] : {}
+                    const host_label = host_latest.hostname || host
+                    const gpuIdx = gpuChart.data.datasets.findIndex(d => d.label === host_label);
+                    const memIdx = memChart.data.datasets.findIndex(d => d.label === host_label);
+                    const cpuIdx = cpuChart.data.datasets.findIndex(d => d.label === host_label);
+                    const tempIdx = tempChart.data.datasets.findIndex(d => d.label === host_label);
+                    
+                    if (gpuIdx >= 0) gpuChart.data.datasets[gpuIdx].data = samples.map(s => parseFloat(s.gpu_util_pct) || 0);
+                    if (memIdx >= 0) memChart.data.datasets[memIdx].data = samples.map(s => parseFloat(s.mem_used_pct) || 0);
+                    if (cpuIdx >= 0) cpuChart.data.datasets[cpuIdx].data = samples.map(s => parseFloat(s.cpu_usage_pct) || 0);
+                    if (tempIdx >= 0) tempChart.data.datasets[tempIdx].data = samples.map(s => parseFloat(s.gpu_temp_c) || 0);
+                });
+                
+                if (gpuChart && gpuChart.data) gpuChart.data.labels = allLabels;
+                if (memChart && memChart.data) memChart.data.labels = allLabels;
+                if (cpuChart && cpuChart.data) cpuChart.data.labels = allLabels;
+                if (tempChart && tempChart.data) tempChart.data.labels = allLabels;
+                
+                if (gpuChart) gpuChart.update('none');
+                if (memChart) memChart.update('none');
+                if (cpuChart) cpuChart.update('none');
+                if (tempChart) tempChart.update('none');
+                
+                // Update table
+                updateTable(data, hosts);
+                
+                // Hide error banner on success
+                document.getElementById('error-banner').style.display = 'none';
+                document.getElementById('connection-status').textContent = 'Connected';
+                
+            } catch (err) {
+                console.error('Fetch error:', err);
+                console.error('Error type:', err.constructor.name);
+                console.error('Full error:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
+                document.getElementById('error-banner').textContent = 'Failed to connect to metrics server';
+                document.getElementById('error-banner').style.display = 'block';
+                document.getElementById('connection-status').textContent = 'Disconnected';
+            }
+        }
+        
+        // Update node table
+        function updateTable(data, hosts) {
+            const tbody = document.querySelector('#nodeTable tbody');
+            tbody.classList.remove('loading');
+            tbody.innerHTML = '';
+            
+            hosts.forEach(host => {
+                const samples = data[host] || [];
+                const latest = samples.length > 0 ? samples[samples.length - 1] : {};
+                
+                const gpu = formatMetric(latest.gpu_util_pct);
+                const gpuTemp = formatMetric(latest.gpu_temp_c, 70, 60, '°C');
+                const cpu = formatMetric(latest.cpu_usage_pct);
+                const mem = formatMetric(latest.mem_used_pct);
+                const jobs = latest.sparkrun_jobs || '0';
+                const power_w = latest.gpu_power_w || 'N/A';
+                const power_limit = latest.gpu_power_limit_w || 'N/A';
+                const power = (power_w !== 'N/A' && power_limit !== 'N/A') 
+                    ? { text: `${power_w}/${power_limit}`, class: '' }
+                    : { text: power_w, class: '' };
+                
+                const row = tbody.insertRow();
+                const display_host = latest.hostname || host;
+                row.innerHTML = `
+                    <td>${display_host}</td>
+                    <td class="metric-value ${gpu.class}">${gpu.text}%</td>
+                    <td class="metric-value ${gpuTemp.class}">${gpuTemp.text}</td>
+                    <td class="metric-value ${cpu.class}">${cpu.text}%</td>
+                    <td class="metric-value ${mem.class}">${mem.text}%</td>
+                    <td class="metric-value">${power.text}W</td>
+                    <td>${jobs}</td>
+                    <td class="status-ok">●</td>
+                `;
+            });
+        }
+        
+        console.log("Script loaded");
+        console.log("Chart.js available:", typeof Chart !== "undefined");
+        console.log("gpuChart variable:", typeof gpuChart);
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            updateMetrics();
+            setInterval(updateMetrics, 2000);
+        });
+    </script>
+</body>
+</html>

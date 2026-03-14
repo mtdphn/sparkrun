@@ -22,6 +22,7 @@ from ._run import run
 from ._setup import setup
 from ._stop_logs import logs_cmd, stop
 from ._tune import tune
+from ._sparkmon import sparkmon
 
 
 @click.group()
@@ -46,6 +47,7 @@ main.add_command(recipe)
 main.add_command(registry)
 main.add_command(benchmark)
 main.add_command(proxy)
+main.add_command(sparkmon)
 
 
 # ---------------------------------------------------------------------------
